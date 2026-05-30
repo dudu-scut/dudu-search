@@ -227,6 +227,59 @@ async def trace_id_middleware(request: Request, call_next):
     return response
 
 
+# ── 全局 QPS 限流中间件 ──
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    """基于 Redis 滑动窗口的全局 QPS 限流。
+
+    跳过: /api/health, /live, /ready, /metrics, /ws, OPTIONS 请求
+    """
+    path = request.url.path
+
+    # 跳过不需要限流的路径
+    if path in ("/api/health", "/live", "/ready", "/metrics"):
+        return await call_next(request)
+    if path.startswith("/ws") or request.method == "OPTIONS":
+        return await call_next(request)
+
+    try:
+        from app.storage.redis_client import get_redis_client
+        redis = await get_redis_client()
+        now_ms = int(time.time() * 1000)
+        window_ms = 1000  # 1 秒窗口
+        max_req_per_window = 100  # 每秒最多 100 请求
+
+        key = "global_qps"
+        # 移除窗口外的旧记录
+        await redis.zremrangebyscore(key, 0, now_ms - window_ms)
+        # 统计当前窗口内的请求数
+        count = await redis.zcard(key)
+
+        if count >= max_req_per_window:
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "error": {
+                        "code": "RATE_LIMITED",
+                        "message": "请求过于频繁，请稍后重试",
+                        "details": {"retry_after": 1},
+                    }
+                },
+                headers={"Retry-After": "1"},
+            )
+
+        # 记录当前请求
+        await redis.zadd(key, {f"{now_ms}:{uuid.uuid4().hex[:8]}": now_ms})
+        await redis.expire(key, 2)
+
+    except Exception:
+        # Redis 不可用时跳过限流，不阻塞业务
+        pass
+
+    return await call_next(request)
+
+
 # ── 限流器 ──
 limiter = Limiter(
     key_func=get_remote_address,
@@ -1029,6 +1082,69 @@ async def ingest_files(
             results[file.filename] = f"摄入失败: {str(e)}"
 
     return {"status": "done", "kb_name": kb_name, "results": results}
+
+
+# ── 健康检查端点 ──
+
+
+@app.get("/api/health")
+async def health_check():
+    """健康检查（公开，无需认证）。"""
+    db_status = "error"
+    redis_status = "error"
+    overall = "down"
+
+    # 检查 DB
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute("SELECT 1")
+        db_status = "connected"
+    except Exception:
+        pass
+
+    # 检查 Redis
+    try:
+        from app.storage.redis_client import get_redis_client
+        redis = await get_redis_client()
+        await redis.ping()
+        redis_status = "connected"
+    except Exception:
+        pass
+
+    # 综合判断
+    if db_status == "connected" and redis_status == "connected":
+        overall = "ok"
+    elif db_status == "connected" or redis_status == "connected":
+        overall = "degraded"
+
+    http_status = 200 if overall in ("ok", "degraded") else 503
+
+    return JSONResponse(
+        status_code=http_status,
+        content={
+            "status": overall,
+            "db": db_status,
+            "redis": redis_status,
+            "version": settings.APP_VERSION,
+        },
+    )
+
+
+@app.get("/live")
+async def liveness():
+    """存活探针 — K8s livenessProbe。仅返回 200，不检查任何依赖。"""
+    return {"status": "alive"}
+
+
+@app.get("/ready")
+async def readiness():
+    """就绪探针 — K8s readinessProbe。检查所有依赖。"""
+    result = await health_check()
+    if result.status_code == 503:
+        raise HTTPException(status_code=503, detail="服务未就绪")
+    return result
 
 
 if __name__ == "__main__":

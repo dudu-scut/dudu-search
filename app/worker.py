@@ -77,6 +77,14 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
         except Exception:
             task_logger.error("无法更新任务失败状态")
         raise  # ARQ 会根据 max_tries 决定是否重试
+    finally:
+        # 释放用户并发配额
+        try:
+            from app.storage.redis_client import get_redis_client
+            redis = await get_redis_client()
+            await redis.decr(f"user_tasks:{user_id}")
+        except Exception:
+            pass
 
 
 # ── ARQ Worker 配置 ──
