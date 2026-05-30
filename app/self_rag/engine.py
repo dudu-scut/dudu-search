@@ -218,32 +218,56 @@ class RAGEngine:
 
     # ---- knowledge base management ----
 
-    def create_kb(self, name: str, description: str = "") -> str:
-        """创建知识库，同时创建子块 collection 和父块 collection。"""
+    def create_kb(self, name: str, description: str = "", group_id: int | None = None) -> str:
+        """创建知识库，同时创建子块 collection 和父块 collection。
+
+        :param group_id: 用户组 ID，用于多租户隔离（可选）
+        """
         safe_name = self._safe_collection_name(name)
         existing = [c.name for c in self._chroma_client.list_collections()]
 
         if safe_name in existing:
             raise ValueError(f"知识库 '{name}' 已存在")
 
+        metadata = {"description": description, "display_name": name, "role": "children"}
+        if group_id is not None:
+            metadata["group_id"] = str(group_id)
+
         self._chroma_client.create_collection(
             name=safe_name,
-            metadata={"description": description, "display_name": name, "role": "children"},
+            metadata=metadata,
         )
+        parent_metadata = {"description": f"{description} (父块)", "display_name": name, "role": "parents"}
+        if group_id is not None:
+            parent_metadata["group_id"] = str(group_id)
+
         parent_name = self._parent_collection_name(name)
         self._chroma_client.create_collection(
             name=parent_name,
-            metadata={"description": f"{description} (父块)", "display_name": name, "role": "parents"},
+            metadata=parent_metadata,
         )
         return safe_name
 
-    def list_kbs(self) -> list[dict]:
-        """列出所有知识库的名称和描述（仅返回子块 collection，父块内部过滤）。"""
+    def list_kbs(self, group_id: int | None = None) -> list[dict]:
+        """列出所有知识库的名称和描述（仅返回子块 collection，父块内部过滤）。
+
+        :param group_id: 用户组 ID，非 None 时仅返回该组的知识库；None 时返回全部（管理员）
+        """
         result = []
         for c in self._chroma_client.list_collections():
             if c.name.startswith("_") or c.name.endswith("_parents"):
                 continue
             meta = self._get_collection_metadata(c.name)
+
+            # 组过滤：仅当 group_id 指定时检查
+            kb_group_id = meta.get("group_id")
+            if group_id is not None:
+                # 没有 group_id 元数据的旧知识库：仅管理员可见（group_id=None 时不进此分支）
+                if kb_group_id is None:
+                    continue
+                if int(kb_group_id) != group_id:
+                    continue
+
             result.append({
                 "name": meta.get("display_name", c.name),
                 "description": meta.get("description", ""),
@@ -251,9 +275,25 @@ class RAGEngine:
             })
         return result
 
-    def delete_kb(self, kb_name: str) -> None:
-        """按名称删除知识库及其父块 collection。"""
+    def delete_kb(self, kb_name: str, group_id: int | None = None) -> None:
+        """按名称删除知识库及其父块 collection。
+
+        :param group_id: 用户组 ID，非 None 时校验所有权；None 时跳过校验（管理员）
+        :raises PermissionError: 组 ID 不匹配
+        :raises ValueError: 知识库不存在
+        """
         safe_name = self._safe_collection_name(kb_name)
+        collection = self.get_kb(kb_name)
+        if collection is None:
+            raise ValueError(f"知识库 '{kb_name}' 不存在")
+
+        # 组所有权校验
+        if group_id is not None:
+            meta = self._get_collection_metadata(safe_name)
+            kb_group_id = meta.get("group_id")
+            if kb_group_id is not None and int(kb_group_id) != group_id:
+                raise ValueError(f"无权删除知识库 '{kb_name}'（组不匹配）")
+
         self._chroma_client.delete_collection(name=safe_name)
         parent_name = self._parent_collection_name(kb_name)
         try:
@@ -269,6 +309,19 @@ class RAGEngine:
             if c.name == safe_name:
                 return c
         return None
+
+    def check_kb_access(self, kb_name: str, group_id: int) -> bool:
+        """校验指定 group_id 是否有权访问该知识库。
+
+        :return: True 表示有权访问或 KB 无 group_id 元数据（旧数据兼容）
+        """
+        safe_name = self._safe_collection_name(kb_name)
+        meta = self._get_collection_metadata(safe_name)
+        kb_group_id = meta.get("group_id")
+        if kb_group_id is None:
+            # 旧知识库无 group_id，兼容放行
+            return True
+        return int(kb_group_id) == group_id
 
     def _parent_collection_name(self, kb_name: str) -> str:
         return f"{self._safe_collection_name(kb_name)}_parents"

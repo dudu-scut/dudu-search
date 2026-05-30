@@ -18,6 +18,7 @@ _thread_id_ctx: ContextVar[Optional[str]] = ContextVar(
     "thread_id",
     default=None,
 )
+_current_group_id: ContextVar[Optional[int]] = ContextVar("group_id", default=None)
 
 
 def set_session_context(path: str) -> Token[Optional[str]]:
@@ -56,6 +57,16 @@ def get_thread_context() -> Optional[str]:
     :return: 当前任务 ID；未设置时返回 None
     """
     return _thread_id_ctx.get()
+
+
+def set_current_group_id(group_id: int) -> None:
+    """设置当前请求链路的用户组 ID，供知识库工具等深层调用读取。"""
+    _current_group_id.set(group_id)
+
+
+def get_current_group_id() -> Optional[int]:
+    """获取当前请求链路的用户组 ID；未设置时返回 None。"""
+    return _current_group_id.get()
 
 
 def reset_session_context(

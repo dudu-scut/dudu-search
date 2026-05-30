@@ -1,5 +1,5 @@
 """FastAPI 依赖注入 — 认证与授权。"""
-from typing import Optional
+from typing import Optional, Tuple
 
 import jwt
 from fastapi import Depends, Header
@@ -63,3 +63,19 @@ async def get_optional_user(
         return await get_current_user(authorization)
     except AuthError:
         return None
+
+
+def get_group_filter(user: UserInfo = Depends(get_current_user)) -> Tuple[Optional[int], str]:
+    """返回 (group_id, SQL WHERE clause) 用于数据隔离过滤。
+
+    管理员可以看到所有组的数据。
+
+    用法:
+        group_id, where_clause = get_group_filter(user)
+        results = await conn.fetch(
+            f"SELECT * FROM sessions WHERE {where_clause}", group_id
+        )
+    """
+    if user.is_admin:
+        return None, "1=1"
+    return user.group_id, "group_id = $1"

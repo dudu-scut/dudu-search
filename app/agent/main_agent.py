@@ -26,6 +26,7 @@ from app.agent.subagents.knowledge_base_agent import knowledge_base_agent
 from app.agent.subagents.network_search_agent import network_search_agent
 from app.api.context import (
     reset_session_context,
+    set_current_group_id,
     set_session_context,
     set_thread_context,
 )
@@ -156,16 +157,16 @@ async def _persist_event(
         print(f"[MainAgent] 事件持久化失败: {e}")
 
 
-async def _ensure_session(thread_id: str) -> None:
+async def _ensure_session(thread_id: str, group_id: int | None = None) -> None:
     """确保 sessions 表中存在对应记录。"""
     try:
         from app.storage.db import get_pool
         pool = await get_pool()
         async with pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO sessions (thread_id, status) VALUES ($1, 'running') "
+                "INSERT INTO sessions (thread_id, status, group_id) VALUES ($1, 'running', $2) "
                 "ON CONFLICT (thread_id) DO UPDATE SET status = 'running', started_at = NOW()",
-                thread_id,
+                thread_id, group_id,
             )
     except Exception as e:
         print(f"[MainAgent] 会话记录失败: {e}")
@@ -199,7 +200,7 @@ async def _run_memory_consolidation(thread_id: str) -> None:
         print(f"[Memory] 会话巩固异常: {e}")
 
 
-async def run_deep_agent(task_query, session_id):
+async def run_deep_agent(task_query, session_id, group_id=None):
     """
     异步流式执行主智能体
 
@@ -207,11 +208,16 @@ async def run_deep_agent(task_query, session_id):
     复制上传文件、写入 ContextVar，并在流式执行过程中把关键事件上报给前端。
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
+    :param group_id: 用户组 ID，用于知识库等工具层隔离过滤（可选）
     """
     print(f"[MainAgent] 开始执行会话，session_id={session_id}")
 
+    # 设置 group_id 到 ContextVar，供知识库工具等深层调用读取
+    if group_id is not None:
+        set_current_group_id(group_id)
+
     # 持久化会话记录
-    asyncio.create_task(_ensure_session(session_id))
+    asyncio.create_task(_ensure_session(session_id, group_id))
 
     # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
     session_dir = project_root_path / "output" / f"session_{session_id}"

@@ -32,7 +32,7 @@ from pydantic import BaseModel
 
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
-from app.auth.dependencies import UserInfo, get_current_user, require_admin
+from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, require_admin
 from app.auth.jwt import create_access_token, hash_password, verify_password
 from app.exceptions import AuthError, DeepAgentsError, ValidationError
 from app.self_rag.config import DOC_STORE_DIR
@@ -314,7 +314,7 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
         old_task.cancel()
 
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id))
+    task = asyncio.create_task(run_deep_agent(request.query, thread_id, group_id=user.group_id))
     active_tasks[thread_id] = task
     # 同步到 Redis
     try:
@@ -524,19 +524,27 @@ async def list_sessions(
     offset: int = 0,
     user: UserInfo = Depends(get_current_user),
 ):
-    """列出历史会话（按开始时间倒序）。"""
+    """列出历史会话（按开始时间倒序），仅返回本组数据。"""
     try:
+        group_id, group_filter = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
+            # 构建参数列表：group_id（非管理员时） + limit + offset
+            params = []
+            if group_id is not None:
+                params.append(group_id)
+            params.extend([limit, offset])
+
             rows = await conn.fetch(
-                """SELECT s.thread_id, s.title, s.status, s.started_at, s.completed_at,
+                f"""SELECT s.thread_id, s.title, s.status, s.started_at, s.completed_at,
                           COUNT(m.id) AS message_count
                    FROM sessions s
                    LEFT JOIN messages m ON s.thread_id = m.thread_id
+                   WHERE {group_filter}
                    GROUP BY s.thread_id, s.title, s.status, s.started_at, s.completed_at
                    ORDER BY s.started_at DESC
-                   LIMIT $1 OFFSET $2""",
-                limit, offset,
+                   LIMIT ${len(params) - 1} OFFSET ${len(params)}""",
+                *params,
             )
             sessions = []
             for row in rows:
@@ -558,16 +566,25 @@ async def get_session_detail(
     thread_id: str,
     user: UserInfo = Depends(get_current_user),
 ):
-    """获取单个会话详情，包含消息历史和事件。"""
+    """获取单个会话详情，包含消息历史和事件。非本组会话不可见。"""
     try:
+        group_id, group_filter = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
-            # 会话基本信息
+            # 会话基本信息（带组过滤）
+            params = [thread_id]
+            if group_id is not None:
+                params.append(group_id)
+                group_clause = f"AND s.{group_filter.replace('$1', f'${len(params)}')}"
+            else:
+                group_clause = ""
+
             session = await conn.fetchrow(
-                "SELECT * FROM sessions WHERE thread_id = $1", thread_id
+                f"SELECT s.* FROM sessions s WHERE s.thread_id = $1 {group_clause}",
+                *params,
             )
             if not session:
-                raise HTTPException(status_code=404, detail="会话不存在")
+                raise HTTPException(status_code=404, detail="会话不存在或无权访问")
 
             # 消息列表
             msg_rows = await conn.fetch(
@@ -621,15 +638,24 @@ async def delete_session(
     thread_id: str,
     user: UserInfo = Depends(get_current_user),
 ):
-    """删除指定会话及其关联数据。"""
+    """删除指定会话及其关联数据。非本组会话不可删除。"""
     try:
+        group_id, group_filter = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
+            params = [thread_id]
+            if group_id is not None:
+                params.append(group_id)
+                group_clause = f"AND {group_filter.replace('$1', f'${len(params)}')}"
+            else:
+                group_clause = ""
+
             result = await conn.execute(
-                "DELETE FROM sessions WHERE thread_id = $1", thread_id
+                f"DELETE FROM sessions WHERE thread_id = $1 {group_clause}",
+                *params,
             )
             if result == "DELETE 0":
-                raise HTTPException(status_code=404, detail="会话不存在")
+                raise HTTPException(status_code=404, detail="会话不存在或无权访问")
             return {"status": "deleted", "thread_id": thread_id}
     except HTTPException:
         raise
@@ -742,10 +768,10 @@ async def create_kb(
     request: KBCreateRequest,
     user: UserInfo = Depends(get_current_user),
 ):
-    """创建自建 RAG 知识库。"""
+    """创建自建 RAG 知识库，写入当前用户组 ID。"""
     try:
         engine = get_rag_engine()
-        kb_id = engine.create_kb(request.name, request.description)
+        kb_id = engine.create_kb(request.name, request.description, group_id=user.group_id)
         return {"status": "created", "kb_id": kb_id, "name": request.name}
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -755,9 +781,10 @@ async def create_kb(
 async def list_kbs(
     user: UserInfo = Depends(get_current_user),
 ):
-    """列出所有自建 RAG 知识库。"""
+    """列出当前用户组可见的自建 RAG 知识库。管理员可见全部。"""
     engine = get_rag_engine()
-    return {"knowledge_bases": engine.list_kbs()}
+    filter_group_id = None if user.is_admin else user.group_id
+    return {"knowledge_bases": engine.list_kbs(group_id=filter_group_id)}
 
 
 @app.delete("/api/kb/{kb_name}")
@@ -765,11 +792,15 @@ async def delete_kb(
     kb_name: str,
     user: UserInfo = Depends(get_current_user),
 ):
-    """删除指定名称的知识库。"""
+    """删除指定名称的知识库。校验组所有权（管理员可删除任意）。"""
     engine = get_rag_engine()
     if engine.get_kb(kb_name) is None:
         raise HTTPException(status_code=404, detail=f"知识库 '{kb_name}' 不存在")
-    engine.delete_kb(kb_name)
+    try:
+        filter_group_id = None if user.is_admin else user.group_id
+        engine.delete_kb(kb_name, group_id=filter_group_id)
+    except ValueError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     return {"status": "deleted", "name": kb_name}
 
 
@@ -779,10 +810,14 @@ async def ingest_files(
     kb_name: str = Form(...),
     user: UserInfo = Depends(get_current_user),
 ):
-    """向指定知识库摄入文档文件（支持 PDF/DOCX/MD/TXT）。"""
+    """向指定知识库摄入文档文件（支持 PDF/DOCX/MD/TXT）。校验组所有权。"""
     engine = get_rag_engine()
     if engine.get_kb(kb_name) is None:
         raise HTTPException(status_code=404, detail=f"知识库 '{kb_name}' 不存在，请先创建")
+
+    # 校验组所有权
+    if not user.is_admin and not engine.check_kb_access(kb_name, user.group_id):
+        raise HTTPException(status_code=403, detail=f"无权访问知识库 '{kb_name}'")
 
     doc_dir = Path(DOC_STORE_DIR) / kb_name
     doc_dir.mkdir(parents=True, exist_ok=True)

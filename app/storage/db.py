@@ -175,6 +175,20 @@ async def init_schema() -> None:
             );
         """)
 
+        # 迁移：sessions 表加 group_id（幂等）
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'sessions' AND column_name = 'group_id'
+                ) THEN
+                    ALTER TABLE sessions ADD COLUMN group_id INTEGER REFERENCES user_groups(id);
+                    UPDATE sessions SET group_id = 1 WHERE group_id IS NULL;
+                END IF;
+            END $$;
+        """)
+
         # 创建默认用户组
         await conn.execute("""
             INSERT INTO user_groups (id, name, description)
