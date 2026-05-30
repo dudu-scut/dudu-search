@@ -1,10 +1,11 @@
 """
 请求上下文管理模块
 
-负责在异步请求链路中保存当前任务的 thread_id 和 session_dir
-工具、智能体和监控模块可以在深层调用中读取这些值，而不需要层层传参
+负责在异步请求链路中保存当前任务的 thread_id、session_dir、trace_id
+和 user_id。工具、智能体和监控模块可以在深层调用中读取这些值，而不需要层层传参。
 """
 
+import uuid
 from contextvars import ContextVar, Token
 from typing import Optional
 
@@ -19,6 +20,8 @@ _thread_id_ctx: ContextVar[Optional[str]] = ContextVar(
     default=None,
 )
 _current_group_id: ContextVar[Optional[int]] = ContextVar("group_id", default=None)
+_current_trace_id: ContextVar[str] = ContextVar("trace_id", default="")
+_current_user_id: ContextVar[str] = ContextVar("user_id", default="")
 
 
 def set_session_context(path: str) -> Token[Optional[str]]:
@@ -67,6 +70,28 @@ def set_current_group_id(group_id: int) -> None:
 def get_current_group_id() -> Optional[int]:
     """获取当前请求链路的用户组 ID；未设置时返回 None。"""
     return _current_group_id.get()
+
+
+def generate_trace_id() -> str:
+    """生成短 trace_id（12 位 hex），并写入 ContextVar。"""
+    trace_id = uuid.uuid4().hex[:12]
+    _current_trace_id.set(trace_id)
+    return trace_id
+
+
+def get_trace_id() -> str:
+    """获取当前请求链路的 trace_id；未设置时返回空字符串。"""
+    return _current_trace_id.get()
+
+
+def set_current_user_id(user_id: str) -> None:
+    """设置当前请求链路的用户 ID，供日志和工具层读取。"""
+    _current_user_id.set(user_id)
+
+
+def get_current_user_id() -> str:
+    """获取当前请求链路的用户 ID；未设置时返回空字符串。"""
+    return _current_user_id.get()
 
 
 def reset_session_context(

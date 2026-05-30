@@ -9,6 +9,9 @@ from pathlib import Path
 import asyncpg
 
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger("db")
 
 _pool: asyncpg.Pool | None = None
 _lock = asyncio.Lock()
@@ -196,4 +199,4 @@ async def init_schema() -> None:
             ON CONFLICT (id) DO NOTHING;
         """)
 
-        print("[DB] Schema initialized successfully")
+        logger.info("Schema 初始化完成")

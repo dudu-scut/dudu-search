@@ -1,4 +1,6 @@
 """统一配置模块 — 所有环境变量从这里读取，启动时自动校验必填项。"""
+
+import sys
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings
 from typing import Optional
@@ -94,6 +96,9 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = 50
     ALLOWED_UPLOAD_EXTENSIONS: str = ".txt,.csv,.md,.pdf,.docx,.xlsx,.png,.jpg,.jpeg,.gif,.json"
 
+    # ── 日志 ──
+    LOG_FORMAT: str = "console"  # "console" (开发模式，彩色) 或 "json" (生产模式)
+
     # ── 任务 ──
     MAX_CONCURRENT_TASKS_PER_USER: int = 3
     TASK_TIMEOUT_SECONDS: int = 300
@@ -125,9 +130,9 @@ def _validate_required(s: Settings) -> None:
     if not s.LLM_API_KEY:
         missing.append("LLM_API_KEY (大模型API密钥，必填)")
     if not s.TAVILY_API_KEY:
-        print("[Config] 警告: TAVILY_API_KEY 未设置，网络搜索功能将不可用")
+        print("[Config] 警告: TAVILY_API_KEY 未设置，网络搜索功能将不可用", file=sys.stderr)
     if s.JWT_SECRET == "change-me-in-production":
-        print("[Config] 警告: JWT_SECRET 使用默认值，生产环境请务必修改！")
+        print("[Config] 警告: JWT_SECRET 使用默认值，生产环境请务必修改！", file=sys.stderr)
     if missing:
         raise SystemExit(
             "缺少必填配置项，请设置以下环境变量:\n  " + "\n  ".join(missing)

@@ -11,6 +11,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from app.config import settings
+from app.logging_config import get_logger
+
+logger = get_logger("memory_service")
 
 # embedding 维度：BAAI/bge-small-zh-v1.5 默认 512
 EMBEDDING_DIM = settings.EMBEDDING_DIM
@@ -75,7 +78,7 @@ class MemoryService:
                     for row in rows
                 ]
         except Exception as e:
-            print(f"[MemoryService] 检索失败: {e}")
+            logger.warning("检索失败", exc_info=True)
             return []
 
     async def retrieve_recent_summaries(self, limit: int = 3) -> list[dict]:
@@ -102,7 +105,7 @@ class MemoryService:
                     for row in rows
                 ]
         except Exception as e:
-            print(f"[MemoryService] 摘要检索失败: {e}")
+            logger.warning("摘要检索失败", exc_info=True)
             return []
 
     # ---- 上下文构建 ----
@@ -166,7 +169,7 @@ class MemoryService:
                 )
                 return str(row["id"]) if row else None
         except Exception as e:
-            print(f"[MemoryService] 记忆存储失败: {e}")
+            logger.warning("记忆存储失败", exc_info=True)
             return None
 
     async def consolidate_session(self, thread_id: str) -> dict:
@@ -218,12 +221,12 @@ class MemoryService:
             return {"summary": summary or "", "title": title or "", "facts": facts}
 
         except Exception as e:
-            print(f"[MemoryService] 会话巩固失败: thread_id={thread_id}, error={e}")
+            logger.warning("会话巩固失败", thread_id=thread_id, exc_info=True)
             # 标记 session 巩固状态为失败
             try:
                 await self._mark_consolidation_failed(thread_id, str(e))
             except Exception:
-                print(f"[MemoryService] 无法更新巩固失败状态: {e}")
+                logger.warning("无法更新巩固失败状态", exc_info=True)
             # 不抛出，巩固失败不影响主流程
             return {"summary": "", "facts": [], "title": ""}
 
@@ -275,7 +278,7 @@ class MemoryService:
                     result.get("facts", []),
                 )
         except Exception as e:
-            print(f"[MemoryService] LLM 提取失败: {e}")
+            logger.warning("LLM 提取失败", exc_info=True)
 
         return None, None, []
 

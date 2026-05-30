@@ -43,6 +43,7 @@ dependencies = [
     "passlib[bcrypt]>=1.7.4",
     "bcrypt==4.0.1",
     "slowapi>=0.1.9",
+    "structlog>=25.5.0",
 ]
 
 [tool.uv]

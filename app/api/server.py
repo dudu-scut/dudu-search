@@ -45,6 +45,7 @@ from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, 
 from app.auth.jwt import create_access_token, decode_token, hash_password, verify_password
 from app.config import settings
 from app.exceptions import AuthError, DeepAgentsError, PermissionDeniedError, ValidationError
+from app.logging_config import get_logger, setup_logging
 from app.self_rag.config import DOC_STORE_DIR
 from app.self_rag.engine import get_rag_engine
 from app.storage.redis_client import (
@@ -55,6 +56,8 @@ from app.storage.redis_client import (
 )
 from app.storage.db import get_pool, init_schema, close_pool
 
+logger = get_logger("server")
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
@@ -63,19 +66,23 @@ async def lifespan(_app: FastAPI):
     启动时绑定当前事件循环到 WebSocket 管理器，确保后台 Agent 任务可以把
     monitor 事件投递回 FastAPI 所在的 loop。
     """
+    # 初始化结构化日志
+    setup_logging(settings.LOG_FORMAT)
+    logger.info("应用启动中...", version=settings.APP_VERSION)
+
     loop = asyncio.get_running_loop()
     manager.set_loop(loop)
-    print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
+    logger.info("WebSocket Manager 已绑定到事件循环", loop_id=id(loop))
 
     # 初始化存储层
     await init_schema()
     redis = await get_redis()
-    print("[Server] Storage layer initialized (PostgreSQL + Redis)")
+    logger.info("存储层初始化完成", components="PostgreSQL+Redis")
 
     yield  # 服务运行中
 
     # 服务关闭时：清理资源
-    print("\n[Server] 正在关闭服务...")
+    logger.info("正在关闭服务...")
 
     # 1. 取消所有正在执行的后台任务
     active_ids = []
@@ -83,7 +90,7 @@ async def lifespan(_app: FastAPI):
         active_ids = await get_active_task_ids()
     except Exception:
         pass
-    print(f"[Server] 正在取消 {len(active_ids)} 个活跃任务...")
+    logger.info("正在取消活跃任务", count=len(active_ids))
     for thread_id in active_ids:
         if thread_id in active_tasks:
             task = active_tasks[thread_id]
@@ -91,7 +98,7 @@ async def lifespan(_app: FastAPI):
                 try:
                     task.cancel()
                 except Exception as e:
-                    print(f"[Server] 取消任务 {thread_id} 失败: {e}")
+                    logger.warning("取消任务失败", thread_id=thread_id, exc_info=True)
 
     if active_tasks:
         try:
@@ -106,20 +113,20 @@ async def lifespan(_app: FastAPI):
     try:
         await manager.disconnect_all()
     except Exception as e:
-        print(f"[Server] 关闭 WebSocket 连接失败: {e}")
+        logger.warning("关闭 WebSocket 连接失败", exc_info=True)
 
     # 4. 关闭存储连接
     try:
         await close_pool()
     except Exception as e:
-        print(f"[Server] 关闭 PostgreSQL 连接池失败: {e}")
+        logger.warning("关闭 PostgreSQL 连接池失败", exc_info=True)
     try:
         from app.storage.redis_client import close_redis
         await close_redis()
     except Exception as e:
-        print(f"[Server] 关闭 Redis 连接失败: {e}")
+        logger.warning("关闭 Redis 连接失败", exc_info=True)
 
-    print("[Server] 服务已关闭")
+    logger.info("服务已关闭")
 
 
 # 当前文件位于 app/api/server.py，运行时目录统一收敛到 app 目录
@@ -134,7 +141,7 @@ app = FastAPI(title="DeepAgents API", lifespan=lifespan)
 @app.exception_handler(DeepAgentsError)
 async def deepagents_exception_handler(request: Request, exc: DeepAgentsError):
     """统一处理所有 DeepAgents 异常，返回结构化 JSON。"""
-    print(f"[Error] {exc.code}: {exc.message}")
+    logger.warning("业务异常", code=exc.code, message=exc.message)
     return JSONResponse(
         status_code=exc.http_status,
         content={
@@ -150,7 +157,7 @@ async def deepagents_exception_handler(request: Request, exc: DeepAgentsError):
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
     """兜底处理未捕获的异常，不泄露内部细节。"""
-    print(f"[UnhandledError] {type(exc).__name__}: {exc}")
+    logger.error("未处理异常", exc_type=type(exc).__name__, error=str(exc))
     return JSONResponse(
         status_code=500,
         content={
@@ -185,6 +192,18 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
+
+
+# ── Trace ID 中间件 ──
+
+@app.middleware("http")
+async def trace_id_middleware(request: Request, call_next):
+    """每个请求入站时生成 trace_id 并写入 ContextVar，便于全链路日志串联。"""
+    from app.api.context import generate_trace_id, set_current_user_id
+    generate_trace_id()
+    response = await call_next(request)
+    return response
+
 
 # ── 限流器 ──
 limiter = Limiter(
@@ -349,7 +368,7 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
     try:
         await register_active_task(thread_id, str(id(task)))
     except Exception as e:
-        print(f"[Server] Redis 任务注册失败: {e}")
+        logger.warning("Redis 任务注册失败", exc_info=True)
     task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
 
     return {"status": "started", "thread_id": thread_id}
@@ -534,7 +553,7 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
     Args:
         path (str): 目标目录的绝对路径 (必须在 output 目录下)。
     """
-    print(f"[DEBUG] 请求文件列表: {path}")
+    logger.debug("请求文件列表", path=path)
 
     try:
         # 和下载接口保持同一条安全边界：前端只能查看 output 目录内部内容
@@ -542,11 +561,11 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
         output_abs = output_dir.resolve()
 
         if not abs_path.is_relative_to(output_abs):
-            print(f"[ERROR] 拒绝访问: {abs_path} 不在 {output_abs} 目录下")
+            logger.warning("拒绝访问: 路径不在 output 目录下", abs_path=str(abs_path), output_abs=str(output_abs))
             return {"error": "拒绝访问: 只能访问输出目录下的文件"}
 
     except Exception as e:
-        print(f"[ERROR] 路径解析失败: {e}")
+        logger.warning("路径解析失败", error=str(e))
         return {"error": f"路径无效: {e}"}
 
     if not abs_path.exists():
@@ -569,12 +588,12 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
                 )
 
     except Exception as e:
-        print(f"[ERROR] 遍历文件失败: {e}")
+        logger.warning("遍历文件失败", error=str(e))
         return {"error": str(e)}
 
     # 最新生成的文件排在前面，方便用户优先看到本次任务产物
     files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
-    print(f"[DEBUG] 找到 {len(files)} 个文件")
+    logger.debug("文件列表查询完成", count=len(files))
     return {"files": files}
 
 
@@ -587,7 +606,7 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     发送事件时只需要按 thread_id 查找连接，就能把进度推给对应页面。循环中的
     receive_text 用于接收前端心跳，避免连接空闲断开。
     """
-    print(f"会话向我们发起了请求，要求建立连接：{thread_id} 对应：{websocket}")
+    logger.info("WebSocket 连接请求", thread_id=thread_id)
 
     # 连接建立后立即按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
     await manager.connect(websocket, thread_id)
@@ -603,10 +622,10 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except WebSocketDisconnect:
         # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接
         manager.disconnect(websocket, thread_id)
-        print(f"[WebSocket] 客户端已断开: {thread_id}")
+        logger.info("WebSocket 客户端已断开", thread_id=thread_id)
 
     except Exception as e:
-        print(f"[WebSocket] 连接异常: {e}")
+        logger.warning("WebSocket 连接异常", exc_info=True)
         manager.disconnect(websocket, thread_id)
 
 

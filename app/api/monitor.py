@@ -13,6 +13,9 @@ from typing import Any, Optional
 from fastapi import WebSocket
 
 from app.api.context import get_thread_context
+from app.logging_config import get_logger
+
+logger = get_logger("monitor")
 
 
 class ToolMonitor:
@@ -64,7 +67,7 @@ class ToolMonitor:
                 if manager_loop and thread_id:
                     self._send_to_websocket(payload, thread_id, manager_loop)
             except Exception as e:
-                print(f"[Monitor] WebSocket send failed: {e}")
+                logger.warning("WebSocket send 失败", exc_info=True)
 
         # DeepAgents 脚本调试时，如果运行时暴露了 stream_writer，也同步写入流式输出
         if hasattr(builtins, "runtime") and hasattr(builtins.runtime, "stream_writer"):
@@ -86,7 +89,7 @@ class ToolMonitor:
             pass
 
         # 控制台保底输出，便于无前端场景下观察执行过程
-        print(f"\n[Monitor:{event_type}] {message}")
+        logger.info(message, event_type=event_type)
 
     def _send_to_websocket(
         self,
@@ -185,21 +188,21 @@ class ConnectionManager:
         """绑定 FastAPI 主事件循环，并同步注册到 monitor"""
         self.loop = loop
         monitor.set_websocket_manager(self)
-        print(f"[Monitor] ConnectionManager manually bound to loop: {id(self.loop)}")
+        logger.info("ConnectionManager 已绑定到事件循环", loop_id=id(self.loop))
 
     async def connect(self, websocket: WebSocket, thread_id: str) -> None:
         """接受 WebSocket 连接，并按 thread_id 保存"""
         await websocket.accept()
         self.active_connections[thread_id] = websocket
-        print(f"Client connected: {thread_id}")
+        logger.info("客户端已连接", thread_id=thread_id)
 
     def disconnect(self, websocket: WebSocket, thread_id: str) -> None:
         """移除已经断开的 WebSocket 连接"""
         if self.active_connections.get(thread_id) is websocket:
             del self.active_connections[thread_id]
-            print(f"Client disconnected: {thread_id}")
+            logger.info("客户端已断开", thread_id=thread_id)
         else:
-            print(f"Stale websocket disconnected, current connection kept: {thread_id}")
+            logger.info("过期 WebSocket 断开，保留当前连接", thread_id=thread_id)
 
     async def send_personal_message(self, message: str, websocket: WebSocket) -> None:
         """向指定 WebSocket 发送纯文本消息"""
@@ -213,15 +216,15 @@ class ConnectionManager:
 
     async def disconnect_all(self) -> None:
         """关闭所有活跃的 WebSocket 连接"""
-        print(f"[Manager] 正在关闭 {len(self.active_connections)} 个 WebSocket 连接...")
+        logger.info("正在关闭 WebSocket 连接", count=len(self.active_connections))
         for thread_id, websocket in list(self.active_connections.items()):
             try:
                 await websocket.close()
-                print(f"[Manager] 已关闭连接: {thread_id}")
+                logger.info("已关闭连接", thread_id=thread_id)
             except Exception as e:
-                print(f"[Manager] 关闭连接 {thread_id} 失败: {e}")
+                logger.warning("关闭连接失败", thread_id=thread_id, exc_info=True)
         self.active_connections.clear()
-        print("[Manager] 所有连接已清理")
+        logger.info("所有连接已清理")
 
 
 manager = ConnectionManager()
@@ -248,7 +251,7 @@ async def _persist_monitor_event(
                 json.dumps(payload, ensure_ascii=False),
             )
     except Exception as e:
-        print(f"[Monitor] 事件持久化失败: event_type={event_type}, error={e}")
+        logger.warning("事件持久化失败", event_type=event_type, exc_info=True)
         # 通过 WebSocket 通知前端（如果连接存在）
         try:
             await monitor._emit_error(

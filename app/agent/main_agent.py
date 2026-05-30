@@ -31,8 +31,11 @@ from app.api.context import (
     set_thread_context,
 )
 from app.api.monitor import monitor
+from app.logging_config import get_logger
 from app.storage.memory_service import get_memory_service
 from app.exceptions import LLMError, LLMTimeoutError
+
+logger = get_logger("main_agent")
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -71,7 +74,7 @@ async def _retryable_llm_invoke(model, messages):
             if not _is_retryable_error(e) or attempt == 2:
                 break
             wait_time = 2 ** attempt
-            print(f"[LLM] 调用失败，{wait_time}s 后重试 (attempt {attempt+1}/3): {e}")
+            logger.warning("LLM 调用失败，即将重试", wait_time=wait_time, attempt=f"{attempt+1}/3", exc_info=True)
             await asyncio.sleep(wait_time)
 
     if isinstance(last_exception, (httpx.ReadTimeout, TimeoutError)):
@@ -92,7 +95,7 @@ async def _retryable_astream(agent, input_data, config):
             if not _is_retryable_error(e) or attempt == 2:
                 break
             wait_time = 2 ** attempt
-            print(f"[Agent] 流式执行失败，{wait_time}s 后重试 (attempt {attempt+1}/3): {e}")
+            logger.warning("Agent 流式执行失败，即将重试", wait_time=wait_time, attempt=f"{attempt+1}/3", exc_info=True)
             await asyncio.sleep(wait_time)
 
     if isinstance(last_exception, (httpx.ReadTimeout, TimeoutError)):
@@ -135,7 +138,7 @@ async def _persist_message(thread_id: str, role: str, content: str) -> None:
                 thread_id, role, content,
             )
     except Exception as e:
-        print(f"[MainAgent] 消息持久化失败: {e}")
+        logger.warning("消息持久化失败", exc_info=True)
 
 
 async def _persist_event(
@@ -154,7 +157,7 @@ async def _persist_event(
                 json.dumps(payload or {}, ensure_ascii=False),
             )
     except Exception as e:
-        print(f"[MainAgent] 事件持久化失败: {e}")
+        logger.warning("事件持久化失败", exc_info=True)
 
 
 async def _ensure_session(thread_id: str, group_id: int | None = None) -> None:
@@ -169,7 +172,7 @@ async def _ensure_session(thread_id: str, group_id: int | None = None) -> None:
                 thread_id, group_id,
             )
     except Exception as e:
-        print(f"[MainAgent] 会话记录失败: {e}")
+        logger.warning("会话记录失败", exc_info=True)
 
 
 async def _complete_session(thread_id: str) -> None:
@@ -184,7 +187,7 @@ async def _complete_session(thread_id: str) -> None:
                 thread_id,
             )
     except Exception as e:
-        print(f"[MainAgent] 会话完成标记失败: {e}")
+        logger.warning("会话完成标记失败", exc_info=True)
 
 
 async def _run_memory_consolidation(thread_id: str) -> None:
@@ -192,12 +195,14 @@ async def _run_memory_consolidation(thread_id: str) -> None:
     try:
         memory_service = get_memory_service()
         result = await memory_service.consolidate_session(thread_id)
-        print(
-            f"[Memory] 会话 {thread_id} 巩固完成: "
-            f"title='{result.get('title')}', facts={len(result.get('facts', []))}"
+        logger.info(
+            "会话巩固完成",
+            thread_id=thread_id,
+            title=result.get('title'),
+            facts_count=len(result.get('facts', [])),
         )
     except Exception as e:
-        print(f"[Memory] 会话巩固异常: {e}")
+        logger.warning("会话巩固异常", exc_info=True)
 
 
 async def run_deep_agent(task_query, session_id, group_id=None):
@@ -210,7 +215,7 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
     :param group_id: 用户组 ID，用于知识库等工具层隔离过滤（可选）
     """
-    print(f"[MainAgent] 开始执行会话，session_id={session_id}")
+    logger.info("开始执行会话", session_id=session_id)
 
     # 设置 group_id 到 ContextVar，供知识库工具等深层调用读取
     if group_id is not None:
@@ -283,7 +288,7 @@ async def run_deep_agent(task_query, session_id, group_id=None):
         memory_service = get_memory_service()
         memory_context = await memory_service.build_context(session_id, task_query)
     except Exception as e:
-        print(f"[MainAgent] 记忆上下文获取失败: {e}")
+        logger.warning("记忆上下文获取失败", exc_info=True)
 
     full_query = task_query + path_instruction
     if memory_context:
@@ -324,9 +329,7 @@ async def run_deep_agent(task_query, session_id, group_id=None):
                                     )
                         elif last_msg.content:
                             # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            print(
-                                f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
-                            )
+                            logger.info("主智能体执行结果", result_preview=last_msg.content[:100])
                             monitor.report_task_result(last_msg.content)
                             # 持久化 assistant 消息
                             asyncio.create_task(_persist_message(
