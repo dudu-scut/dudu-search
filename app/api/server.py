@@ -39,6 +39,9 @@ from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+from arq import create_pool
+from arq.connections import RedisSettings
+
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
 from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, require_admin
@@ -79,6 +82,16 @@ async def lifespan(_app: FastAPI):
     redis = await get_redis()
     logger.info("存储层初始化完成", components="PostgreSQL+Redis")
 
+    # 初始化 ARQ 任务队列客户端
+    arq_client = await create_pool(RedisSettings(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        password=settings.REDIS_PASSWORD,
+        database=settings.REDIS_DB,
+    ))
+    _app.state.arq_client = arq_client
+    logger.info("ARQ 任务队列客户端已初始化")
+
     yield  # 服务运行中
 
     # 服务关闭时：清理资源
@@ -115,7 +128,16 @@ async def lifespan(_app: FastAPI):
     except Exception as e:
         logger.warning("关闭 WebSocket 连接失败", exc_info=True)
 
-    # 4. 关闭存储连接
+    # 4. 关闭 ARQ 客户端
+    try:
+        arq_client = _app.state.arq_client
+        if arq_client:
+            await arq_client.close()
+            logger.info("ARQ 客户端已关闭")
+    except Exception as e:
+        logger.warning("关闭 ARQ 客户端失败", exc_info=True)
+
+    # 5. 关闭存储连接
     try:
         await close_pool()
     except Exception as e:
@@ -351,27 +373,55 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
     """
     启动一次 DeepAgents 后台任务。
 
-    HTTP 请求只负责创建后台协程并立即返回，后续执行轨迹、子智能体调用和最终
-    答案都会由 monitor 通过 `/ws/{thread_id}` 推送给同一会话的前端。
+    任务通过 ARQ 入队到 Worker 异步执行，HTTP 请求只负责提交并立即返回。
+    后续执行轨迹、子智能体调用和最终答案都会由 monitor 通过 `/ws/{thread_id}`
+    推送给同一会话的前端。
     """
     thread_id = request.thread_id or str(uuid.uuid4())
 
-    # 同一个 thread_id 只保留一个活跃任务，新任务会先取消旧任务，避免并发写同一会话目录
-    old_task = active_tasks.get(thread_id)
-    if old_task and not old_task.done():
-        old_task.cancel()
+    if not request.query.strip():
+        raise HTTPException(status_code=422, detail="查询内容不能为空")
 
-    # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
-    task = asyncio.create_task(run_deep_agent(request.query, thread_id, group_id=user.group_id))
-    active_tasks[thread_id] = task
-    # 同步到 Redis
-    try:
-        await register_active_task(thread_id, str(id(task)))
-    except Exception as e:
-        logger.warning("Redis 任务注册失败", exc_info=True)
-    task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
+    # 用户并发检查（Redis 计数器）
+    from app.storage.redis_client import get_redis_client
+    redis = await get_redis_client()
+    user_task_key = f"user_tasks:{user.id}"
+    current_count = await redis.incr(user_task_key)
+    await redis.expire(user_task_key, 600)  # 10 分钟过期防止泄漏
 
-    return {"status": "started", "thread_id": thread_id}
+    if current_count > settings.MAX_CONCURRENT_TASKS_PER_USER:
+        await redis.decr(user_task_key)
+        raise HTTPException(
+            status_code=429,
+            detail=f"并行任务已达上限({settings.MAX_CONCURRENT_TASKS_PER_USER})，请等待当前任务完成",
+        )
+
+    # 确保 session 记录存在（状态初始为 queued）
+    from app.storage.db import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO sessions (thread_id, title, status, user_id, group_id)
+            VALUES ($1, $2, 'queued', $3, $4)
+            ON CONFLICT (thread_id) DO UPDATE SET status = 'queued'
+            """,
+            thread_id, request.query[:100], user.id, user.group_id,
+        )
+
+    # 入队到 ARQ Worker
+    arq_client = request.app.state.arq_client
+    job = await arq_client.enqueue_job(
+        "run_agent_task", request.query, thread_id, user.id, user.group_id,
+    )
+
+    logger.info("任务已入队", thread_id=thread_id, job_id=job.job_id)
+
+    return {
+        "thread_id": thread_id,
+        "task_id": job.job_id,
+        "status": "queued",
+    }
 
 
 @app.post("/api/task/{thread_id}/cancel")
@@ -402,6 +452,29 @@ async def cancel_task(thread_id: str, user: UserInfo = Depends(get_current_user)
 
     _forget_task(thread_id, task)
     return {"status": "cancelled", "thread_id": thread_id}
+
+
+@app.get("/api/task/{task_id}/status")
+async def get_task_status(
+    task_id: str,
+    request: Request,
+    user: UserInfo = Depends(get_current_user),
+):
+    """查询 ARQ 任务队列状态。"""
+    arq_client = request.app.state.arq_client
+    job = await arq_client.get_job(task_id)
+
+    if job is None:
+        raise HTTPException(status_code=404, detail="任务不存在或已过期")
+
+    job_status = await job.status()
+    return {
+        "task_id": task_id,
+        "status": str(job_status),
+        "enqueue_time": job.enqueue_time.isoformat() if job.enqueue_time else None,
+        "start_time": job.start_time.isoformat() if job.start_time else None,
+        "finish_time": job.finish_time.isoformat() if job.finish_time else None,
+    }
 
 
 # ── 文件上传安全校验 ──

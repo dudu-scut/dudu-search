@@ -44,6 +44,7 @@ dependencies = [
     "bcrypt==4.0.1",
     "slowapi>=0.1.9",
     "structlog>=25.5.0",
+    "arq>=0.28.0",
 ]
 
 [tool.uv]
