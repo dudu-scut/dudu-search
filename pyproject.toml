@@ -45,6 +45,7 @@ dependencies = [
     "slowapi>=0.1.9",
     "structlog>=25.5.0",
     "arq>=0.28.0",
+    "prometheus-client>=0.25.0",
 ]
 
 [tool.uv]

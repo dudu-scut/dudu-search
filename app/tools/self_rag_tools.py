@@ -10,6 +10,7 @@ query_knowledge_base 用于向指定知识库发起知识问答。
 
 from app.api.context import get_current_group_id
 from app.api.monitor import monitor
+from app.metrics import TOOL_CALL_DURATION, TOOL_CALL_TOTAL
 from app.self_rag.engine import get_rag_engine
 from langchain_core.tools import tool
 
@@ -61,15 +62,17 @@ def query_knowledge_base(kb_name: str, question: str) -> str:
         args={"kb_name": kb_name, "question": question},
     )
 
+    TOOL_CALL_TOTAL.labels(tool_name="query_knowledge_base").inc()
     try:
-        engine = get_rag_engine()
+        with TOOL_CALL_DURATION.labels(tool_name="query_knowledge_base").time():
+            engine = get_rag_engine()
 
-        # 校验当前用户组是否有权访问该知识库
-        group_id = get_current_group_id()
-        if group_id is not None and not engine.check_kb_access(kb_name, group_id):
-            return f"知识库 '{kb_name}' 不属于当前用户组，无权访问。"
+            # 校验当前用户组是否有权访问该知识库
+            group_id = get_current_group_id()
+            if group_id is not None and not engine.check_kb_access(kb_name, group_id):
+                return f"知识库 '{kb_name}' 不属于当前用户组，无权访问。"
 
-        result = engine.query(kb_name=kb_name, question=question)
-        return result
+            result = engine.query(kb_name=kb_name, question=question)
+            return result
     except Exception as e:
         return f"知识库提问失败，错误原因：{str(e)}"

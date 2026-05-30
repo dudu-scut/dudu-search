@@ -13,6 +13,7 @@ from mysql.connector import Error, connect
 
 from app.api.monitor import monitor
 from app.config import settings
+from app.metrics import SQL_QUERY_DURATION, SQL_QUERY_TOTAL
 
 
 # 集中读取数据库配置，后续三个工具都复用这份连接参数
@@ -240,11 +241,13 @@ def execute_sql_query(query) -> str:
     # 获取数据库参数
     config = get_db_config()
 
+    SQL_QUERY_TOTAL.labels(table="custom").inc()
     try:
-        with connect(**config) as conn:
-            with conn.cursor() as cursor:
-                # 执行校验后的安全查询
-                cursor.execute(safe_query)
+        with SQL_QUERY_DURATION.labels(table="custom").time():
+            with connect(**config) as conn:
+                with conn.cursor() as cursor:
+                    # 执行校验后的安全查询
+                    cursor.execute(safe_query)
 
                 description = cursor.description
                 if not description:

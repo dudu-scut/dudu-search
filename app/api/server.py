@@ -33,7 +33,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -278,6 +278,35 @@ async def rate_limit_middleware(request: Request, call_next):
         pass
 
     return await call_next(request)
+
+
+# ── HTTP 请求指标中间件 ──
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    """HTTP 请求指标收集（Prometheus）。"""
+    from app.metrics import HTTP_REQUEST_DURATION, HTTP_REQUEST_TOTAL
+
+    start = time.time()
+    response = await call_next(request)
+    duration = time.time() - start
+
+    path = request.url.path
+    # 泛化路径（将 ID 替换为 {id} 避免指标爆炸）
+    generic_path = re.sub(r'/[a-f0-9\-]{36}', '/{id}', path)
+    generic_path = re.sub(r'/\d+', '/{id}', generic_path)
+
+    HTTP_REQUEST_TOTAL.labels(
+        method=request.method,
+        path=generic_path,
+        status=response.status_code,
+    ).inc()
+    HTTP_REQUEST_DURATION.labels(
+        method=request.method,
+        path=generic_path,
+    ).observe(duration)
+
+    return response
 
 
 # ── 限流器 ──
@@ -1145,6 +1174,19 @@ async def readiness():
     if result.status_code == 503:
         raise HTTPException(status_code=503, detail="服务未就绪")
     return result
+
+
+# ── Prometheus 指标端点 ──
+
+
+@app.get("/metrics")
+async def metrics(user: UserInfo = Depends(require_admin)):
+    """Prometheus 指标端点（仅管理员可访问）。"""
+    from app.metrics import get_metrics
+    return Response(
+        content=get_metrics(),
+        media_type="text/plain; charset=utf-8",
+    )
 
 
 if __name__ == "__main__":
