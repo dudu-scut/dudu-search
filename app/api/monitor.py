@@ -111,6 +111,24 @@ class ToolMonitor:
         else:
             asyncio.run_coroutine_threadsafe(coroutine, manager_loop)
 
+    async def _emit_error(self, code: str, message: str) -> None:
+        """发送错误事件到前端。"""
+        payload = {
+            "type": "monitor_error",
+            "event": "error",
+            "message": message,
+            "data": {"code": code},
+            "timestamp": datetime.datetime.now().isoformat(),
+        }
+        if self.websocket_manager:
+            try:
+                thread_id = get_thread_context()
+                manager_loop = self.websocket_manager.loop
+                if manager_loop and thread_id:
+                    self._send_to_websocket(payload, thread_id, manager_loop)
+            except Exception:
+                pass
+
     def report_tool(
         self,
         tool_name: str,
@@ -229,5 +247,13 @@ async def _persist_monitor_event(
                 thread_id, event_type, message,
                 json.dumps(payload, ensure_ascii=False),
             )
-    except Exception:
-        pass  # 事件持久化失败不阻塞主流程
+    except Exception as e:
+        print(f"[Monitor] 事件持久化失败: event_type={event_type}, error={e}")
+        # 通过 WebSocket 通知前端（如果连接存在）
+        try:
+            await monitor._emit_error(
+                code="EVENT_PERSIST_ERROR",
+                message="事件记录失败，执行轨迹可能不完整",
+            )
+        except Exception:
+            pass

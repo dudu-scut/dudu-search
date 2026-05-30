@@ -19,16 +19,18 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Request,
     UploadFile,
     WebSocket,
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
+from app.exceptions import DeepAgentsError
 from app.self_rag.config import DOC_STORE_DIR
 from app.self_rag.engine import get_rag_engine
 from app.storage.redis_client import (
@@ -111,6 +113,43 @@ current_dir = Path(__file__).resolve().parent
 project_root = current_dir.parent
 
 app = FastAPI(title="DeepAgents API", lifespan=lifespan)
+
+
+# ── 统一异常处理 ──
+
+@app.exception_handler(DeepAgentsError)
+async def deepagents_exception_handler(request: Request, exc: DeepAgentsError):
+    """统一处理所有 DeepAgents 异常，返回结构化 JSON。"""
+    print(f"[Error] {exc.code}: {exc.message}")
+    return JSONResponse(
+        status_code=exc.http_status,
+        content={
+            "error": {
+                "code": exc.code,
+                "message": exc.message,
+                "details": exc.details,
+            }
+        },
+    )
+
+
+@app.exception_handler(Exception)
+async def generic_exception_handler(request: Request, exc: Exception):
+    """兜底处理未捕获的异常，不泄露内部细节。"""
+    print(f"[UnhandledError] {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "服务器内部错误，请稍后重试",
+                "details": {},
+            }
+        },
+    )
+
+
+# ── 任务管理 ──
 
 # 保存 thread_id -> 后台 Agent 任务，用于同一会话任务替换和主动取消
 active_tasks: dict[str, asyncio.Task] = {}

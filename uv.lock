@@ -494,6 +494,7 @@ dependencies = [
     { name = "requests" },
     { name = "sentence-transformers" },
     { name = "tavily-python" },
+    { name = "tenacity" },
     { name = "typing-extensions" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -532,6 +533,7 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31.0" },
     { name = "sentence-transformers", specifier = ">=5.0.0" },
     { name = "tavily-python", specifier = "==0.7.24" },
+    { name = "tenacity", specifier = ">=9.1.4" },
     { name = "typing-extensions", specifier = ">=4.5.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.20.0" },
 ]

@@ -140,4 +140,15 @@ async def init_schema() -> None:
             END $$;
         """)
 
+        # 迁移：添加 sessions 巩固状态列（幂等）
+        await conn.execute("""
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS consolidation_status VARCHAR(20) DEFAULT NULL;
+        """)
+        await conn.execute("""
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS consolidation_error TEXT DEFAULT NULL;
+        """)
+        await conn.execute("""
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+        """)
+
         print("[DB] Schema initialized successfully")

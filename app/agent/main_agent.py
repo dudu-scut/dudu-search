@@ -11,6 +11,9 @@ import shutil
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+
 from deepagents import create_deep_agent
 
 from langgraph.checkpoint.postgres import PostgresSaver
@@ -28,6 +31,7 @@ from app.api.context import (
 )
 from app.api.monitor import monitor
 from app.storage.memory_service import get_memory_service
+from app.exceptions import LLMError, LLMTimeoutError
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -37,6 +41,62 @@ from app.tools.upload_file_read_tool import read_file_content
 # 基础工具和子智能体列表在所有 agent 实例间共享
 _BASE_TOOLS = [generate_markdown, convert_md_to_pdf, read_file_content]
 _BASE_SUBAGENTS = [database_query_agent, network_search_agent, knowledge_base_agent]
+
+
+# ── LLM 重试逻辑 ──
+
+
+def _is_retryable_error(exception: Exception) -> bool:
+    """判断异常是否可重试（仅网络类异常可重试）。"""
+    if isinstance(exception, (httpx.ReadTimeout, httpx.ConnectError,
+                               httpx.RemoteProtocolError, ConnectionError,
+                               TimeoutError)):
+        return True
+    if isinstance(exception, httpx.HTTPStatusError):
+        if exception.response.status_code in (429, 503, 502):
+            return True
+        return False
+    return False
+
+
+async def _retryable_llm_invoke(model, messages):
+    """带重试的 LLM 调用。"""
+    last_exception = None
+    for attempt in range(3):
+        try:
+            return await model.ainvoke(messages)
+        except Exception as e:
+            last_exception = e
+            if not _is_retryable_error(e) or attempt == 2:
+                break
+            wait_time = 2 ** attempt
+            print(f"[LLM] 调用失败，{wait_time}s 后重试 (attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(wait_time)
+
+    if isinstance(last_exception, (httpx.ReadTimeout, TimeoutError)):
+        raise LLMTimeoutError(f"LLM 调用超时，已重试 3 次: {last_exception}")
+    raise LLMError(f"LLM 调用失败: {last_exception}")
+
+
+async def _retryable_astream(agent, input_data, config):
+    """带重试的 Agent 流式执行。"""
+    last_exception = None
+    for attempt in range(3):
+        try:
+            async for chunk in agent.astream(input_data, config=config):
+                yield chunk
+            return
+        except Exception as e:
+            last_exception = e
+            if not _is_retryable_error(e) or attempt == 2:
+                break
+            wait_time = 2 ** attempt
+            print(f"[Agent] 流式执行失败，{wait_time}s 后重试 (attempt {attempt+1}/3): {e}")
+            await asyncio.sleep(wait_time)
+
+    if isinstance(last_exception, (httpx.ReadTimeout, TimeoutError)):
+        raise LLMTimeoutError(f"Agent 流式执行超时，已重试 3 次: {last_exception}")
+    raise LLMError(f"Agent 流式执行失败: {last_exception}")
 
 
 def _build_main_agent(current_date: str):
@@ -229,7 +289,9 @@ async def run_deep_agent(task_query, session_id):
 
     try:
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
-        async for chunk in agent.astream(
+        # 使用 _retryable_astream 包装，网络异常时自动重试
+        async for chunk in _retryable_astream(
+            agent,
             {"messages": [{"role": "user", "content": full_query}]},
             config=config,
         ):

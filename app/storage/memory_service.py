@@ -218,8 +218,31 @@ class MemoryService:
             return {"summary": summary or "", "title": title or "", "facts": facts}
 
         except Exception as e:
-            print(f"[MemoryService] 会话巩固失败: {e}")
+            print(f"[MemoryService] 会话巩固失败: thread_id={thread_id}, error={e}")
+            # 标记 session 巩固状态为失败
+            try:
+                await self._mark_consolidation_failed(thread_id, str(e))
+            except Exception:
+                print(f"[MemoryService] 无法更新巩固失败状态: {e}")
+            # 不抛出，巩固失败不影响主流程
             return {"summary": "", "facts": [], "title": ""}
+
+    async def _mark_consolidation_failed(self, thread_id: str, error_msg: str) -> None:
+        """标记会话记忆巩固失败。"""
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                UPDATE sessions
+                SET consolidation_status = 'failed',
+                    consolidation_error = $2,
+                    updated_at = NOW()
+                WHERE thread_id = $1
+                """,
+                thread_id,
+                error_msg[:500],
+            )
 
     async def _llm_extract(self, conversation: str) -> tuple[str | None, str | None, list[dict]]:
         """调用 LLM 提取摘要和事实（使用项目中已有的 model）。"""
