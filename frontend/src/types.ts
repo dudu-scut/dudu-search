@@ -59,3 +59,40 @@ export interface UploadedItem {
   size: number;
   raw: File;
 }
+
+export interface SessionSummary {
+  thread_id: string;
+  title: string;
+  status: string;
+  message_count: number;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface SessionListResponse {
+  sessions: SessionSummary[];
+}
+
+export interface SessionDetail {
+  thread_id: string;
+  title: string | null;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  messages: SessionMessage[];
+  events: SessionEvent[];
+}
+
+export interface SessionMessage {
+  role: string;
+  content: string | null;
+  tool_calls: unknown;
+  created_at: string;
+}
+
+export interface SessionEvent {
+  event_type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
+}

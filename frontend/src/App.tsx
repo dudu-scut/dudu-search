@@ -12,6 +12,8 @@ import { Alert, App as AntApp, Button } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
+import SessionList from "./components/SessionList";
+import MemoryPanel from "./components/MemoryPanel";
 import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
@@ -156,6 +158,16 @@ export default function App() {
         <Button className="new-chat-button" block onClick={handleNewSession}>
           新建研搜
         </Button>
+
+        <SessionList
+          activeThreadId={session.threadId}
+          onSelect={(_threadId: string) => {
+            handleNewSession();
+          }}
+          onNewSession={handleNewSession}
+        />
+
+        <MemoryPanel />
 
         <div className="sidebar-section">
           <span className="sidebar-label">THREAD</span>

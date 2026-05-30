@@ -31,6 +31,13 @@ from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
 from app.self_rag.config import DOC_STORE_DIR
 from app.self_rag.engine import get_rag_engine
+from app.storage.redis_client import (
+    get_redis,
+    register_active_task,
+    unregister_active_task,
+    get_active_task_ids,
+)
+from app.storage.db import get_pool, init_schema, close_pool
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
@@ -43,38 +50,59 @@ async def lifespan(_app: FastAPI):
     loop = asyncio.get_running_loop()
     manager.set_loop(loop)
     print(f"[Server] WebSocket Manager bound to loop: {id(loop)}")
-    
+
+    # 初始化存储层
+    await init_schema()
+    redis = await get_redis()
+    print("[Server] Storage layer initialized (PostgreSQL + Redis)")
+
     yield  # 服务运行中
-    
+
     # 服务关闭时：清理资源
     print("\n[Server] 正在关闭服务...")
-    
+
     # 1. 取消所有正在执行的后台任务
-    print(f"[Server] 正在取消 {len(active_tasks)} 个活跃任务...")
-    for thread_id, task in list(active_tasks.items()):
-        if not task.done():
-            try:
-                task.cancel()
-                print(f"[Server] 已取消任务: {thread_id}")
-            except Exception as e:
-                print(f"[Server] 取消任务 {thread_id} 失败: {e}")
-    
-    # 等待一小段时间让任务响应取消
+    active_ids = []
+    try:
+        active_ids = await get_active_task_ids()
+    except Exception:
+        pass
+    print(f"[Server] 正在取消 {len(active_ids)} 个活跃任务...")
+    for thread_id in active_ids:
+        if thread_id in active_tasks:
+            task = active_tasks[thread_id]
+            if not task.done():
+                try:
+                    task.cancel()
+                except Exception as e:
+                    print(f"[Server] 取消任务 {thread_id} 失败: {e}")
+
     if active_tasks:
         try:
             await asyncio.sleep(0.5)
         except:
             pass
-    
+
     # 2. 清理任务注册表
     active_tasks.clear()
-    
+
     # 3. 关闭所有 WebSocket 连接
     try:
         await manager.disconnect_all()
     except Exception as e:
         print(f"[Server] 关闭 WebSocket 连接失败: {e}")
-    
+
+    # 4. 关闭存储连接
+    try:
+        await close_pool()
+    except Exception as e:
+        print(f"[Server] 关闭 PostgreSQL 连接池失败: {e}")
+    try:
+        from app.storage.redis_client import close_redis
+        await close_redis()
+    except Exception as e:
+        print(f"[Server] 关闭 Redis 连接失败: {e}")
+
     print("[Server] 服务已关闭")
 
 
@@ -121,6 +149,8 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
     """
     if active_tasks.get(thread_id) is task:
         active_tasks.pop(thread_id, None)
+        # 异步从 Redis 移除
+        asyncio.ensure_future(unregister_active_task(thread_id))
 
 
 @app.post("/api/task")
@@ -141,6 +171,11 @@ async def run_task(request: TaskRequest):
     # create_task 把长耗时 Agent 执行交给事件循环，接口本身不用等待最终结果
     task = asyncio.create_task(run_deep_agent(request.query, thread_id))
     active_tasks[thread_id] = task
+    # 同步到 Redis
+    try:
+        await register_active_task(thread_id, str(id(task)))
+    except Exception as e:
+        print(f"[Server] Redis 任务注册失败: {e}")
     task.add_done_callback(lambda finished_task: _forget_task(thread_id, finished_task))
 
     return {"status": "started", "thread_id": thread_id}
@@ -322,6 +357,207 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         print(f"[WebSocket] 连接异常: {e}")
         manager.disconnect(websocket, thread_id)
 
+
+# ---- 会话历史管理 API ----
+
+class SessionSummary(BaseModel):
+    thread_id: str
+    title: str | None = None
+    status: str
+    message_count: int = 0
+    started_at: str | None = None
+    completed_at: str | None = None
+
+
+@app.get("/api/sessions")
+async def list_sessions(limit: int = 20, offset: int = 0):
+    """列出历史会话（按开始时间倒序）。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT s.thread_id, s.title, s.status, s.started_at, s.completed_at,
+                          COUNT(m.id) AS message_count
+                   FROM sessions s
+                   LEFT JOIN messages m ON s.thread_id = m.thread_id
+                   GROUP BY s.thread_id, s.title, s.status, s.started_at, s.completed_at
+                   ORDER BY s.started_at DESC
+                   LIMIT $1 OFFSET $2""",
+                limit, offset,
+            )
+            sessions = []
+            for row in rows:
+                sessions.append({
+                    "thread_id": row["thread_id"],
+                    "title": row["title"] or row["thread_id"][:8],
+                    "status": row["status"],
+                    "message_count": row["message_count"],
+                    "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                    "completed_at": row["completed_at"].isoformat() if row["completed_at"] else None,
+                })
+            return {"sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询会话列表失败: {e}")
+
+
+@app.get("/api/sessions/{thread_id}")
+async def get_session_detail(thread_id: str):
+    """获取单个会话详情，包含消息历史和事件。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # 会话基本信息
+            session = await conn.fetchrow(
+                "SELECT * FROM sessions WHERE thread_id = $1", thread_id
+            )
+            if not session:
+                raise HTTPException(status_code=404, detail="会话不存在")
+
+            # 消息列表
+            msg_rows = await conn.fetch(
+                "SELECT role, content, tool_calls, created_at FROM messages "
+                "WHERE thread_id = $1 ORDER BY created_at ASC",
+                thread_id,
+            )
+            messages = [
+                {
+                    "role": row["role"],
+                    "content": row["content"],
+                    "tool_calls": row["tool_calls"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                for row in msg_rows
+            ]
+
+            # 事件列表
+            event_rows = await conn.fetch(
+                "SELECT event_type, message, payload, created_at FROM agent_events "
+                "WHERE thread_id = $1 ORDER BY created_at ASC",
+                thread_id,
+            )
+            events = [
+                {
+                    "event_type": row["event_type"],
+                    "message": row["message"],
+                    "payload": row["payload"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                for row in event_rows
+            ]
+
+            return {
+                "thread_id": session["thread_id"],
+                "title": session["title"],
+                "status": session["status"],
+                "started_at": session["started_at"].isoformat() if session["started_at"] else None,
+                "completed_at": session["completed_at"].isoformat() if session["completed_at"] else None,
+                "messages": messages,
+                "events": events,
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询会话详情失败: {e}")
+
+
+@app.delete("/api/sessions/{thread_id}")
+async def delete_session(thread_id: str):
+    """删除指定会话及其关联数据。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM sessions WHERE thread_id = $1", thread_id
+            )
+            if result == "DELETE 0":
+                raise HTTPException(status_code=404, detail="会话不存在")
+            return {"status": "deleted", "thread_id": thread_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除会话失败: {e}")
+# ---- 记忆管理 API ----
+
+class MemoryCreateRequest(BaseModel):
+    content: str
+    memory_type: str = "fact"
+    importance: float = 0.5
+
+
+@app.get("/api/memories")
+async def list_memories(memory_type: str | None = None, limit: int = 50, offset: int = 0):
+    """列出长期记忆。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            if memory_type:
+                rows = await conn.fetch(
+                    """SELECT id, memory_type, content, importance, access_count,
+                               last_accessed, source_thread_id, created_at
+                       FROM long_term_memories
+                       WHERE memory_type = $1
+                       ORDER BY created_at DESC
+                       LIMIT $2 OFFSET $3""",
+                    memory_type, limit, offset,
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT id, memory_type, content, importance, access_count,
+                               last_accessed, source_thread_id, created_at
+                       FROM long_term_memories
+                       ORDER BY created_at DESC
+                       LIMIT $1 OFFSET $2""",
+                    limit, offset,
+                )
+            memories = [
+                {
+                    "id": str(row["id"]),
+                    "memory_type": row["memory_type"],
+                    "content": row["content"],
+                    "importance": row["importance"],
+                    "access_count": row["access_count"],
+                    "last_accessed": row["last_accessed"].isoformat() if row["last_accessed"] else None,
+                    "source_thread_id": row["source_thread_id"],
+                    "created_at": row["created_at"].isoformat(),
+                }
+                for row in rows
+            ]
+            return {"memories": memories}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"查询记忆失败: {e}")
+
+
+@app.delete("/api/memories/{memory_id}")
+async def delete_memory(memory_id: str):
+    """删除指定记忆。"""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            result = await conn.execute(
+                "DELETE FROM long_term_memories WHERE id = $1::uuid", memory_id
+            )
+            if result == "DELETE 0":
+                raise HTTPException(status_code=404, detail="记忆不存在")
+            return {"status": "deleted", "id": memory_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"删除记忆失败: {e}")
+
+
+@app.post("/api/memories")
+async def create_memory(request: MemoryCreateRequest):
+    """手动创建记忆。"""
+    from app.storage.memory_service import get_memory_service
+    memory_service = get_memory_service()
+    memory_id = await memory_service.store_memory(
+        content=request.content,
+        memory_type=request.memory_type,
+        importance=request.importance,
+    )
+    if not memory_id:
+        raise HTTPException(status_code=500, detail="记忆创建失败")
+    return {"status": "created", "id": memory_id}
 
 # ---- 自建 RAG 知识库管理 API ----
 

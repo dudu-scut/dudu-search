@@ -12,7 +12,12 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from deepagents import create_deep_agent
-from langgraph.checkpoint.memory import InMemorySaver
+import os
+
+from dotenv import find_dotenv, load_dotenv
+from langgraph.checkpoint.postgres import PostgresSaver
+
+load_dotenv(find_dotenv())
 
 from app.agent.llm import model
 from app.agent.prompts import main_agent_content
@@ -25,6 +30,7 @@ from app.api.context import (
     set_thread_context,
 )
 from app.api.monitor import monitor
+from app.storage.memory_service import get_memory_service
 
 # 文件类工具由主智能体直接掌握，负责读取上传附件和生成最终交付文档
 from app.tools.markdown_tools import generate_markdown
@@ -41,19 +47,102 @@ def _build_main_agent(current_date: str):
 
     DeepAgents 子智能体在独立会话中运行，无法读取父会话用户消息，
     因此日期必须写进系统提示词，子智能体才能感知。
+
+    使用 PostgresSaver 替代 InMemorySaver，实现检查点持久化。
     """
+    postgres_uri = os.getenv(
+        "POSTGRES_URI",
+        "postgresql://deepagents:deepagents@localhost:5432/deepagents",
+    )
+    checkpointer = PostgresSaver.from_conn_string(postgres_uri)
     return create_deep_agent(
         model=model,
         system_prompt=main_agent_content["system_prompt"].format(
             current_date=current_date
         ),
         tools=_BASE_TOOLS,
-        checkpointer=InMemorySaver(),
+        checkpointer=checkpointer,
         subagents=_BASE_SUBAGENTS,
     )
 
 # 当前文件位于 app/agent/main_agent.py，parents[1] 即 app 目录
 project_root_path = Path(__file__).parents[1].resolve()
+
+
+async def _persist_message(thread_id: str, role: str, content: str) -> None:
+    """异步持久化单条消息到 PostgreSQL。"""
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO messages (thread_id, role, content) VALUES ($1, $2, $3)",
+                thread_id, role, content,
+            )
+    except Exception as e:
+        print(f"[MainAgent] 消息持久化失败: {e}")
+
+
+async def _persist_event(
+    thread_id: str, event_type: str, message: str, payload: dict | None = None
+) -> None:
+    """异步持久化 Agent 事件到 PostgreSQL。"""
+    try:
+        import json
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_events (thread_id, event_type, message, payload) "
+                "VALUES ($1, $2, $3, $4)",
+                thread_id, event_type, message,
+                json.dumps(payload or {}, ensure_ascii=False),
+            )
+    except Exception as e:
+        print(f"[MainAgent] 事件持久化失败: {e}")
+
+
+async def _ensure_session(thread_id: str) -> None:
+    """确保 sessions 表中存在对应记录。"""
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO sessions (thread_id, status) VALUES ($1, 'running') "
+                "ON CONFLICT (thread_id) DO UPDATE SET status = 'running', started_at = NOW()",
+                thread_id,
+            )
+    except Exception as e:
+        print(f"[MainAgent] 会话记录失败: {e}")
+
+
+async def _complete_session(thread_id: str) -> None:
+    """标记会话为已完成。"""
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE sessions SET status = 'completed', completed_at = NOW() "
+                "WHERE thread_id = $1",
+                thread_id,
+            )
+    except Exception as e:
+        print(f"[MainAgent] 会话完成标记失败: {e}")
+
+
+async def _run_memory_consolidation(thread_id: str) -> None:
+    """后台执行记忆巩固 Pipeline。"""
+    try:
+        memory_service = get_memory_service()
+        result = await memory_service.consolidate_session(thread_id)
+        print(
+            f"[Memory] 会话 {thread_id} 巩固完成: "
+            f"title='{result.get('title')}', facts={len(result.get('facts', []))}"
+        )
+    except Exception as e:
+        print(f"[Memory] 会话巩固异常: {e}")
 
 
 async def run_deep_agent(task_query, session_id):
@@ -66,6 +155,9 @@ async def run_deep_agent(task_query, session_id):
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
     """
     print(f"[MainAgent] 开始执行会话，session_id={session_id}")
+
+    # 持久化会话记录
+    asyncio.create_task(_ensure_session(session_id))
 
     # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
     session_dir = project_root_path / "output" / f"session_{session_id}"
@@ -125,10 +217,26 @@ async def run_deep_agent(task_query, session_id):
     4. 若存在上传文件，请先分析内容
     """
 
+    # 检索并注入相关记忆上下文
+    memory_context = ""
+    try:
+        memory_service = get_memory_service()
+        memory_context = await memory_service.build_context(session_id, task_query)
+    except Exception as e:
+        print(f"[MainAgent] 记忆上下文获取失败: {e}")
+
+    full_query = task_query + path_instruction
+    if memory_context:
+        full_query = (
+            f"【记忆上下文 — 请参考以下信息辅助本次任务】\n"
+            f"{memory_context}\n\n"
+            f"【用户问题】\n{full_query}"
+        )
+
     try:
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
         async for chunk in agent.astream(
-            {"messages": [{"role": "user", "content": task_query + path_instruction}]},
+            {"messages": [{"role": "user", "content": full_query}]},
             config=config,
         ):
             # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
@@ -158,6 +266,10 @@ async def run_deep_agent(task_query, session_id):
                                 f"主智能体执行结果，最终结果：{last_msg.content[:100]}"
                             )
                             monitor.report_task_result(last_msg.content)
+                            # 持久化 assistant 消息
+                            asyncio.create_task(_persist_message(
+                                session_id, "assistant", last_msg.content
+                            ))
 
     except asyncio.CancelledError:
         monitor.report_task_cancelled()
@@ -166,6 +278,13 @@ async def run_deep_agent(task_query, session_id):
         # 异步执行异常也走 monitor，保证前端能收到明确错误事件
         monitor._emit("error", f"执行主智能发生异常信息：{str(e)}")
     finally:
+        # 标记会话完成
+        asyncio.create_task(_complete_session(session_id))
+        # 异步触发记忆巩固（不阻塞会话完成）
+        try:
+            asyncio.create_task(_run_memory_consolidation(session_id))
+        except Exception:
+            pass
         # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
         reset_session_context(session_dir_token, session_id_token)
 

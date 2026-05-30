@@ -32,6 +32,8 @@
 - **实时交互体验**：WebSocket 实时推送任务进度和结果，支持流式输出
 - **会话隔离管理**：每个任务独立工作目录，数据安全隔离，保护隐私信息
 - **灵活的部署方式**：支持本地部署、Docker 容器化、私有云部署，满足不同安全要求
+- **存储持久化**：完整的会话、消息和事件持久化，支持历史会话回溯
+- **记忆系统**：基于 pgvector 的语义记忆检索，自动记忆重要信息并跨会话复用
 
 ## 系统架构
 
@@ -58,7 +60,8 @@
 | 智能体框架 | DeepAgents 0.5.7 + LangChain 1.2 + LangGraph 1.1 |
 | 大语言模型 | DeepSeek (deepseek-chat)                         |
 | 后端框架  | FastAPI + Uvicorn                                |
-| 数据库   | MySQL 8.4                                        |
+| 数据库   | PostgreSQL 16 + pgvector (向量数据库)                |
+| 缓存/消息队列 | Redis 7                                          |
 | 知识库   | ChromaDB + sentence-transformers                 |
 | 前端    | React + TypeScript + Vite                        |
 
@@ -68,7 +71,7 @@
 
 - Python 3.12
 - Node.js 18+
-- MySQL 8.4 (或 Docker)
+- Docker Desktop
 - API 密钥：DeepSeek API、Tavily API
 
 ### 1. 克隆与安装
@@ -104,21 +107,36 @@ LLM_DEEPSEEK_MODEL=deepseek-chat
 # Tavily 搜索 API
 TAVILY_API_KEY=your_tavily_key_here
 
-# MySQL 数据库配置
-MYSQL_HOST=localhost
-MYSQL_PORT=3306
-MYSQL_USER=root
-MYSQL_PASSWORD=your_mysql_password
-MYSQL_DATABASE=deepsearch_db
+# PostgreSQL 数据库配置
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_USER=deepagents
+POSTGRES_PASSWORD=deepagents
+POSTGRES_DB=deepagents
+
+# Redis 配置
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=deepagents
 ```
 
-### 3. 启动 MySQL 数据库
+### 3. 启动数据库服务
 
-使用 Docker 启动 MySQL：
+使用 Docker 启动 PostgreSQL + Redis：
 
 ```bash
 cd docker
-docker-compose up -d
+docker compose up -d postgres redis
+```
+
+验证数据库连接：
+
+```bash
+# PostgreSQL
+docker compose exec postgres psql -U deepagents -d deepagents -c "SELECT 1;"
+
+# Redis
+docker compose exec redis redis-cli -a deepagents ping
 ```
 
 ### 4. 启动服务
@@ -126,6 +144,7 @@ docker-compose up -d
 **后端服务**（端口 8000）：
 
 ```bash
+cd ..
 uv run python -m app.api.server
 ```
 
@@ -137,6 +156,58 @@ pnpm dev
 ```
 
 访问 `http://localhost:5173` 即可使用系统。
+
+## 存储持久化与记忆系统
+
+### 架构概览
+
+```
+用户请求 → FastAPI
+    ├─ Redis: 活跃任务注册 (替代内存 dict)
+    ├─ PostgreSQL:
+    │   ├─ sessions 表: 会话元数据
+    │   ├─ messages 表: 对话历史
+    │   ├─ agent_events 表: 执行轨迹
+    │   └─ long_term_memories 表: 长期记忆 (pgvector)
+    ├─ PostgresSaver: LangGraph 检查点持久化 (替代 InMemorySaver)
+    └─ MemoryService:
+        ├─ 检索: 语义检索 (pgvector cosine) + 会话摘要
+        ├─ 注入: 新对话时自动注入相关记忆上下文
+        └─ 巩固: 会话结束 → LLM 摘要 + 事实提取 → 长期记忆
+```
+
+### 新增 API 端点
+
+| 方法 | 端点 | 说明 |
+| ---- | ---- | ---- |
+| GET | `/api/sessions` | 历史会话列表（分页、按时间倒序） |
+| GET | `/api/sessions/{thread_id}` | 会话详情（消息 + 事件） |
+| DELETE | `/api/sessions/{thread_id}` | 删除会话（级联删除消息/事件） |
+| GET | `/api/memories` | 长期记忆列表（按类型筛选） |
+| POST | `/api/memories` | 手动创建记忆 |
+| DELETE | `/api/memories/{memory_id}` | 删除记忆 |
+
+### 新增文件
+
+- `app/storage/__init__.py` - storage 包入口
+- `app/storage/db.py` - PostgreSQL 连接池 + Schema (4表)
+- `app/storage/redis_client.py` - Redis 客户端 + 热状态操作
+- `app/storage/memory_service.py` - 记忆服务：检索/存储/巩固 Pipeline
+- `frontend/src/components/SessionList.tsx` - 历史会话侧边栏列表
+- `frontend/src/components/MemoryPanel.tsx` - Agent 记忆面板
+
+### 修改文件
+
+- `docker/docker-compose.yaml` - PostgreSQL 16 pgvector + Redis 7 (含密码认证)
+- `pyproject.toml` - 添加 asyncpg, redis, langgraph-checkpoint-postgres, pgvector, psycopg-binary
+- `requirements.txt` - 同步依赖
+- `.env` / `.env.example` - PostgreSQL + Redis 环境变量
+- `app/agent/main_agent.py` - PostgresSaver + 会话/消息持久化 + 记忆注入
+- `app/api/server.py` - Redis 任务注册 + 会话 CRUD + 记忆 CRUD API
+- `app/api/monitor.py` - 事件持久化到 PostgreSQL
+- `frontend/src/types.ts` - 会话/记忆 TypeScript 类型
+- `frontend/src/lib/api.ts` - 会话/记忆 API 函数
+- `frontend/src/App.tsx` - 集成 SessionList + MemoryPanel
 
 ## 私域部署方案
 
@@ -276,6 +347,11 @@ deepsearch-agents/
 │   │   ├── server.py         # FastAPI 服务入口
 │   │   ├── monitor.py       # 实时事件监控
 │   │   └── context.py       # 会话上下文管理
+│   ├── storage/               # 存储持久化模块
+│   │   ├── __init__.py
+│   │   ├── db.py             # PostgreSQL 连接与 Schema
+│   │   ├── redis_client.py  # Redis 客户端
+│   │   └── memory_service.py # 记忆服务
 │   ├── tools/                # 工具函数
 │   │   ├── tavily_tool.py   # 网络搜索工具
 │   │   ├── db_tools.py      # 数据库工具
@@ -288,9 +364,14 @@ deepsearch-agents/
 │   └── prompt/               # 提示词配置
 │       └── prompts.yml       # 集中式提示词管理
 ├── frontend/                  # React 前端
+│   └── src/
+│       ├── components/
+│       │   ├── SessionList.tsx
+│       │   └── MemoryPanel.tsx
+│       ├── types.ts
+│       └── lib/api.ts
 ├── docker/                    # Docker 部署配置
-│   └── mysql/
-│       └── mysql.sql         # 数据库初始化脚本
+│   └── docker-compose.yaml   # PostgreSQL + Redis 配置
 └── examples/                  # 示例代码
     └── skills/               # 技能扩展示例
 ```
@@ -411,11 +492,14 @@ uv run python -m app.tools.tavily_tool
 | `OPENAI_API_KEY`           | LLM API 密钥    | -                          |
 | `LLM_DEEPSEEK_MODEL`       | 模型名称          | deepseek-chat              |
 | `TAVILY_API_KEY`           | Tavily API 密钥 | -                          |
-| `MYSQL_HOST`               | MySQL 主机      | localhost                  |
-| `MYSQL_PORT`               | MySQL 端口      | 3306                       |
-| `MYSQL_USER`               | MySQL 用户      | root                       |
-| `MYSQL_PASSWORD`           | MySQL 密码      | -                          |
-| `MYSQL_DATABASE`           | 数据库名          | deepsearch\_db             |
+| `POSTGRES_HOST`           | PostgreSQL 主机  | localhost                  |
+| `POSTGRES_PORT`           | PostgreSQL 端口  | 5432                       |
+| `POSTGRES_USER`           | PostgreSQL 用户  | deepagents                 |
+| `POSTGRES_PASSWORD`       | PostgreSQL 密码  | deepagents                 |
+| `POSTGRES_DB`             | PostgreSQL 数据库名 | deepagents                 |
+| `REDIS_HOST`              | Redis 主机       | localhost                  |
+| `REDIS_PORT`              | Redis 端口       | 6379                       |
+| `REDIS_PASSWORD`          | Redis 密码       | deepagents                 |
 | `SELF_RAG_EMBEDDING_MODEL` | 嵌入模型          | BAAI/bge-small-zh-v1.5     |
 | `SELF_RAG_TOP_K`           | 检索返回数         | 4                          |
 | `SELF_RAG_BM25_ENABLED`    | 启用 BM25       | true                       |

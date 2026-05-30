@@ -73,6 +73,18 @@ class ToolMonitor:
             except Exception:
                 pass
 
+        # 持久化事件到 PostgreSQL（fire-and-forget，不阻塞主流程）
+        try:
+            import asyncio as _asyncio
+            _asyncio.ensure_future(_persist_monitor_event(
+                thread_id=get_thread_context(),
+                event_type=event_type,
+                message=message,
+                payload=data or {},
+            ))
+        except Exception:
+            pass
+
         # 控制台保底输出，便于无前端场景下观察执行过程
         print(f"\n[Monitor:{event_type}] {message}")
 
@@ -195,3 +207,27 @@ class ConnectionManager:
 
 
 manager = ConnectionManager()
+
+
+async def _persist_monitor_event(
+    thread_id: str | None,
+    event_type: str,
+    message: str,
+    payload: dict,
+) -> None:
+    """将监控事件异步写入 PostgreSQL。"""
+    if not thread_id:
+        return
+    try:
+        import json
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO agent_events (thread_id, event_type, message, payload) "
+                "VALUES ($1, $2, $3, $4)",
+                thread_id, event_type, message,
+                json.dumps(payload, ensure_ascii=False),
+            )
+    except Exception:
+        pass  # 事件持久化失败不阻塞主流程

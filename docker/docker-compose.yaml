@@ -40,5 +40,42 @@ services:
       retries: 10
       start_period: 30s
 
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: deepsearch-postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-deepagents}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-deepagents}
+      POSTGRES_DB: ${POSTGRES_DB:-deepagents}
+    volumes:
+      - deepsearch_postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER:-deepagents}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: deepsearch-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: redis-server --requirepass ${REDIS_PASSWORD:-deepagents}
+    volumes:
+      - deepsearch_redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "$${REDIS_PASSWORD:-deepagents}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
 volumes:
   deepsearch_mysql_data:
+  deepsearch_postgres_data:
+  deepsearch_redis_data:

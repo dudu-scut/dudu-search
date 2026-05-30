@@ -34,7 +34,54 @@ if [ ! -f ".env" ]; then
 fi
 _ok ".env 已就绪"
 
-# ---------- 2. Python 包管理器 ----------
+# ---------- 2. Docker 服务 (PostgreSQL + Redis) ----------
+DOCKER_RUNNING=false
+if command -v docker &> /dev/null; then
+    if docker info &> /dev/null; then
+        _ok "Docker 已就绪"
+        DOCKER_RUNNING=true
+    else
+        _warn "Docker 未运行，正在尝试启动 Docker Desktop..."
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            open -a Docker 2>/dev/null &
+        elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" ]]; then
+            start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>/dev/null &
+        fi
+        _info "等待 Docker 启动 (最多 60 秒)..."
+        for i in $(seq 1 20); do
+            if docker info &> /dev/null; then
+                DOCKER_RUNNING=true
+                break
+            fi
+            sleep 3
+        done
+    fi
+fi
+
+if $DOCKER_RUNNING; then
+    _info "启动 PostgreSQL + Redis ..."
+    cd docker
+    docker compose up -d postgres redis 2>&1
+    if [ $? -ne 0 ]; then
+        _err "Docker 服务启动失败"
+        cd ..
+        exit 1
+    fi
+    cd ..
+
+    _info "等待数据库就绪 ..."
+    for i in $(seq 1 30); do
+        if docker compose -f docker/docker-compose.yaml exec -T postgres pg_isready -U deepagents > /dev/null 2>&1; then
+            break
+        fi
+        sleep 2
+    done
+    _ok "PostgreSQL + Redis 已就绪"
+else
+    _warn "Docker 不可用，跳过持久化服务 (将使用内存模式运行)"
+fi
+
+# ---------- 3. Python 包管理器 ----------
 PKG_MGR=""
 if command -v uv &> /dev/null; then
     PKG_MGR="uv"
@@ -47,14 +94,14 @@ else
     exit 1
 fi
 
-# ---------- 3. 后端依赖 ----------
+# ---------- 4. 后端依赖 ----------
 _info "同步 Python 依赖..."
 if [ "$PKG_MGR" = "uv" ]; then
     uv sync
 fi
 _ok "Python 依赖已同步"
 
-# ---------- 4. Node 包管理器 ----------
+# ---------- 5. Node 包管理器 ----------
 NODE_PKG=""
 if command -v pnpm &> /dev/null; then
     NODE_PKG="pnpm"
@@ -68,7 +115,7 @@ else
 fi
 _ok "前端包管理器: $NODE_PKG"
 
-# ---------- 5. 前端依赖 ----------
+# ---------- 6. 前端依赖 ----------
 if [ ! -d "frontend/node_modules" ]; then
     _info "安装前端依赖..."
     cd frontend && $NODE_PKG install && cd ..
@@ -77,18 +124,24 @@ else
     _ok "前端依赖已就绪"
 fi
 
-# ---------- 6. 清理函数 ----------
+# ---------- 7. 清理函数 ----------
 cleanup() {
     echo ""
     _info "正在关闭服务..."
     [ -n "$BACKEND_PID" ] && kill "$BACKEND_PID" 2>/dev/null && _ok "后端已停止"
     [ -n "$FRONTEND_PID" ] && kill "$FRONTEND_PID" 2>/dev/null && _ok "前端已停止"
+    if $DOCKER_RUNNING; then
+        _info "停止 Docker 服务..."
+        cd "$SCRIPT_DIR/docker"
+        docker compose stop postgres redis 2>/dev/null && _ok "Docker 服务已停止"
+        cd "$SCRIPT_DIR"
+    fi
     _ok "所有服务已关闭"
     exit 0
 }
 trap cleanup SIGINT SIGTERM
 
-# ---------- 7. 启动服务 ----------
+# ---------- 8. 启动服务 ----------
 echo ""
 echo "  ═══════════════════════════════════════════"
 echo "    API 文档:    http://localhost:8000/docs"

@@ -67,3 +67,6 @@ Thumbs.db
 
 # Examples directory
 examples/
+
+# Docs directory
+docs/

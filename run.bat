@@ -25,7 +25,55 @@ if not exist ".env" (
 )
 echo [✓] .env 已就绪
 
-:: ---------- 2. 检查 Python/uv ----------
+:: ---------- 2. Docker 服务 (PostgreSQL + Redis) ----------
+where docker >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [!] 未找到 Docker，请安装 Docker Desktop
+    echo     持久化存储需要 PostgreSQL + Redis，跳过...
+    goto skip_docker
+)
+
+docker info >nul 2>&1
+if %errorlevel% neq 0 (
+    echo [!] Docker 未运行，正在尝试启动...
+    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe" 2>nul
+    echo [*] 等待 Docker 启动 (最多 60 秒)...
+    set /a docker_wait=0
+    :wait_docker
+    docker info >nul 2>&1
+    if not %errorlevel% equ 0 (
+        timeout /t 3 /nobreak >nul
+        set /a docker_wait+=3
+        if !docker_wait! lss 60 goto wait_docker
+        echo [!] Docker 启动超时，请手动启动 Docker Desktop 后重试
+        pause
+        exit /b 1
+    )
+)
+echo [✓] Docker 已就绪
+
+echo [*] 启动 PostgreSQL + Redis ...
+cd docker
+docker compose up -d postgres redis 2>&1
+if %errorlevel% neq 0 (
+    echo [!] Docker 服务启动失败
+    cd ..
+    pause
+    exit /b 1
+)
+cd ..
+
+echo [*] 等待数据库就绪 ...
+:wait_pg
+docker compose -f docker/docker-compose.yaml exec -T postgres pg_isready -U deepagents >nul 2>&1
+if %errorlevel% neq 0 (
+    timeout /t 2 /nobreak >nul
+    goto wait_pg
+)
+echo [✓] PostgreSQL + Redis 已就绪
+:skip_docker
+
+:: ---------- 3. 检查 Python/uv ----------
 where uv >nul 2>&1
 if %errorlevel% neq 0 (
     echo [!] 未找到 uv，请先安装: https://docs.astral.sh/uv/
@@ -34,7 +82,7 @@ if %errorlevel% neq 0 (
 )
 echo [✓] uv 已就绪
 
-:: ---------- 3. 后端依赖 ----------
+:: ---------- 4. 后端依赖 ----------
 echo [*] 同步 Python 依赖...
 uv sync 2>&1
 if %errorlevel% neq 0 (
@@ -44,7 +92,7 @@ if %errorlevel% neq 0 (
 )
 echo [✓] Python 依赖已同步
 
-:: ---------- 4. 前端包管理器 ----------
+:: ---------- 5. 前端包管理器 ----------
 set "PKG_MGR="
 where pnpm >nul 2>&1 && set "PKG_MGR=pnpm"
 if not defined PKG_MGR (
@@ -57,7 +105,7 @@ if not defined PKG_MGR (
 )
 echo [✓] 前端包管理器: %PKG_MGR%
 
-:: ---------- 5. 前端依赖 ----------
+:: ---------- 6. 前端依赖 ----------
 if not exist "frontend\node_modules" (
     echo [*] 安装前端依赖...
     cd frontend
@@ -74,7 +122,7 @@ if not exist "frontend\node_modules" (
     echo [✓] 前端依赖已就绪
 )
 
-:: ---------- 6. 启动服务 ----------
+:: ---------- 7. 启动服务 ----------
 echo.
 echo   ═══════════════════════════════════════════
 echo    后端 API:    http://localhost:8000
