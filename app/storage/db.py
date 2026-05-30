@@ -151,4 +151,35 @@ async def init_schema() -> None:
             ALTER TABLE sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
         """)
 
+        # 用户组表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_groups (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) UNIQUE NOT NULL,
+                description TEXT,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        # 用户表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                username VARCHAR(50) UNIQUE NOT NULL,
+                password_hash VARCHAR(128) NOT NULL,
+                email VARCHAR(255),
+                group_id INTEGER REFERENCES user_groups(id) ON DELETE SET NULL,
+                role VARCHAR(20) NOT NULL DEFAULT 'user',
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        # 创建默认用户组
+        await conn.execute("""
+            INSERT INTO user_groups (id, name, description)
+            VALUES (1, '默认组', '系统默认用户组')
+            ON CONFLICT (id) DO NOTHING;
+        """)
+
         print("[DB] Schema initialized successfully")

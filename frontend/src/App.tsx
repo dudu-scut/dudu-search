@@ -6,16 +6,20 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
-  ToolOutlined
+  LogoutOutlined,
+  ToolOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
-import { Alert, App as AntApp, Button } from "antd";
+import { Alert, App as AntApp, Avatar, Button, Dropdown, Space } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
-import SessionList from "./components/SessionList";
+import LoginPage from "./components/LoginPage";
 import MemoryPanel from "./components/MemoryPanel";
+import SessionList from "./components/SessionList";
 import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
+import { getUser, isLoggedIn, logout } from "./lib/auth";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import type { ConnectionState, UploadedItem } from "./types";
 
@@ -43,11 +47,16 @@ function createTurn(content: string): ChatTurn {
 
 export default function App() {
   const { message } = AntApp.useApp();
+  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const streamRef = useRef<HTMLElement | null>(null);
   const session = useDeepAgentSession();
+
+  if (!loggedIn) {
+    return <LoginPage onLoginSuccess={() => setLoggedIn(true)} />;
+  }
 
   useEffect(() => {
     setTurns((previous) => {
@@ -230,9 +239,40 @@ export default function App() {
             <span className="panel-kicker">CHAT WORKSPACE</span>
             <h2>深度研搜对话</h2>
           </div>
-          <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
-            {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
-            {session.isRunning ? "研搜中" : "待命"}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
+              {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
+              {session.isRunning ? "研搜中" : "待命"}
+            </div>
+            <Dropdown
+              menu={{
+                items: [
+                  {
+                    key: "user",
+                    label: getUser()?.username || "用户",
+                    disabled: true,
+                  },
+                  {
+                    type: "divider",
+                  },
+                  {
+                    key: "logout",
+                    icon: <LogoutOutlined />,
+                    label: "退出登录",
+                    danger: true,
+                    onClick: logout,
+                  },
+                ],
+              }}
+              placement="bottomRight"
+            >
+              <Button type="text" style={{ display: "flex", alignItems: "center" }}>
+                <Space>
+                  <Avatar size={24} icon={<UserOutlined />} />
+                  <span>{getUser()?.username || "用户"}</span>
+                </Space>
+              </Button>
+            </Dropdown>
           </div>
         </header>
 

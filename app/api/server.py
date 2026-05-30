@@ -7,6 +7,7 @@ WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执�
 """
 
 import asyncio
+import re
 import shutil
 import uuid
 from contextlib import asynccontextmanager
@@ -15,6 +16,7 @@ from typing import List
 
 import uvicorn
 from fastapi import (
+    Depends,
     FastAPI,
     File,
     Form,
@@ -30,7 +32,9 @@ from pydantic import BaseModel
 
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
-from app.exceptions import DeepAgentsError
+from app.auth.dependencies import UserInfo, get_current_user, require_admin
+from app.auth.jwt import create_access_token, hash_password, verify_password
+from app.exceptions import AuthError, DeepAgentsError, ValidationError
 from app.self_rag.config import DOC_STORE_DIR
 from app.self_rag.engine import get_rag_engine
 from app.storage.redis_client import (
@@ -172,6 +176,108 @@ app.add_middleware(
 )
 
 
+# ── 认证 API ──
+
+
+@app.post("/api/auth/register")
+async def register(request: Request):
+    """用户注册。"""
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+
+    if not username or len(username) < 3 or len(username) > 50:
+        raise ValidationError("用户名需为 3-50 个字符")
+    if not re.match(r"^[a-zA-Z0-9_一-鿿]+$", username):
+        raise ValidationError("用户名只能包含字母、数字、下划线、中文")
+    if len(password) < 6:
+        raise ValidationError("密码至少需要 6 个字符")
+
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchval(
+            "SELECT id FROM users WHERE username = $1", username
+        )
+        if existing:
+            raise ValidationError("用户名已存在")
+
+        password_hash_val = hash_password(password)
+        user_id = await conn.fetchval(
+            """
+            INSERT INTO users (username, password_hash, email, group_id, role)
+            VALUES ($1, $2, $3, 1, 'user')
+            RETURNING id::text
+            """,
+            username,
+            password_hash_val,
+            body.get("email", ""),
+        )
+
+    token = create_access_token(user_id=user_id, username=username, group_id=1)
+    return {
+        "token": token,
+        "user": {"id": user_id, "username": username, "role": "user", "group_id": 1},
+    }
+
+
+@app.post("/api/auth/login")
+async def login(request: Request):
+    """用户登录。"""
+    body = await request.json()
+    username = (body.get("username") or "").strip()
+    password = body.get("password") or ""
+
+    if not username or not password:
+        raise AuthError("用户名和密码不能为空")
+
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id::text, username, password_hash, role, group_id, is_active "
+            "FROM users WHERE username = $1",
+            username,
+        )
+
+    if row is None:
+        raise AuthError("用户名或密码错误")
+    if not row["is_active"]:
+        raise AuthError("账户已被禁用")
+
+    if not verify_password(password, row["password_hash"]):
+        raise AuthError("用户名或密码错误")
+
+    token = create_access_token(
+        user_id=row["id"],
+        username=row["username"],
+        role=row["role"],
+        group_id=row["group_id"],
+    )
+    return {
+        "token": token,
+        "user": {
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "group_id": row["group_id"],
+        },
+    }
+
+
+@app.get("/api/auth/me")
+async def get_me(user: UserInfo = Depends(get_current_user)):
+    """获取当前登录用户信息。"""
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": user.role,
+        "group_id": user.group_id,
+    }
+
+
 class TaskRequest(BaseModel):
     """前端启动任务时提交的请求体。"""
 
@@ -193,7 +299,7 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
 
 
 @app.post("/api/task")
-async def run_task(request: TaskRequest):
+async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_user)):
     """
     启动一次 DeepAgents 后台任务。
 
@@ -221,7 +327,7 @@ async def run_task(request: TaskRequest):
 
 
 @app.post("/api/task/{thread_id}/cancel")
-async def cancel_task(thread_id: str):
+async def cancel_task(thread_id: str, user: UserInfo = Depends(get_current_user)):
     """
     取消指定 thread_id 对应的后台 Agent 任务。
 
@@ -251,7 +357,11 @@ async def cancel_task(thread_id: str):
 
 
 @app.post("/api/upload")
-async def upload_files(files: List[UploadFile] = File(...), thread_id: str = Form(...)):
+async def upload_files(
+    files: List[UploadFile] = File(...),
+    thread_id: str = Form(...),
+    user: UserInfo = Depends(get_current_user),
+):
     """
     文件上传接口 (File Upload)。
 
@@ -280,7 +390,7 @@ async def upload_files(files: List[UploadFile] = File(...), thread_id: str = For
 
 
 @app.get("/api/download")
-async def download_file(path: str):
+async def download_file(path: str, user: UserInfo = Depends(get_current_user)):
     """
     文件下载接口 (File Download)。
 
@@ -309,7 +419,7 @@ async def download_file(path: str):
 
 
 @app.get("/api/files")
-async def list_files(path: str):
+async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
     """
     文件列表查询接口 (File Explorer)。
 
@@ -409,7 +519,11 @@ class SessionSummary(BaseModel):
 
 
 @app.get("/api/sessions")
-async def list_sessions(limit: int = 20, offset: int = 0):
+async def list_sessions(
+    limit: int = 20,
+    offset: int = 0,
+    user: UserInfo = Depends(get_current_user),
+):
     """列出历史会话（按开始时间倒序）。"""
     try:
         pool = await get_pool()
@@ -440,7 +554,10 @@ async def list_sessions(limit: int = 20, offset: int = 0):
 
 
 @app.get("/api/sessions/{thread_id}")
-async def get_session_detail(thread_id: str):
+async def get_session_detail(
+    thread_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """获取单个会话详情，包含消息历史和事件。"""
     try:
         pool = await get_pool()
@@ -500,7 +617,10 @@ async def get_session_detail(thread_id: str):
 
 
 @app.delete("/api/sessions/{thread_id}")
-async def delete_session(thread_id: str):
+async def delete_session(
+    thread_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """删除指定会话及其关联数据。"""
     try:
         pool = await get_pool()
@@ -524,7 +644,12 @@ class MemoryCreateRequest(BaseModel):
 
 
 @app.get("/api/memories")
-async def list_memories(memory_type: str | None = None, limit: int = 50, offset: int = 0):
+async def list_memories(
+    memory_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    user: UserInfo = Depends(get_current_user),
+):
     """列出长期记忆。"""
     try:
         pool = await get_pool()
@@ -567,7 +692,10 @@ async def list_memories(memory_type: str | None = None, limit: int = 50, offset:
 
 
 @app.delete("/api/memories/{memory_id}")
-async def delete_memory(memory_id: str):
+async def delete_memory(
+    memory_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """删除指定记忆。"""
     try:
         pool = await get_pool()
@@ -585,7 +713,10 @@ async def delete_memory(memory_id: str):
 
 
 @app.post("/api/memories")
-async def create_memory(request: MemoryCreateRequest):
+async def create_memory(
+    request: MemoryCreateRequest,
+    user: UserInfo = Depends(get_current_user),
+):
     """手动创建记忆。"""
     from app.storage.memory_service import get_memory_service
     memory_service = get_memory_service()
@@ -607,7 +738,10 @@ class KBCreateRequest(BaseModel):
 
 
 @app.post("/api/kb/create")
-async def create_kb(request: KBCreateRequest):
+async def create_kb(
+    request: KBCreateRequest,
+    user: UserInfo = Depends(get_current_user),
+):
     """创建自建 RAG 知识库。"""
     try:
         engine = get_rag_engine()
@@ -618,14 +752,19 @@ async def create_kb(request: KBCreateRequest):
 
 
 @app.get("/api/kb/list")
-async def list_kbs():
+async def list_kbs(
+    user: UserInfo = Depends(get_current_user),
+):
     """列出所有自建 RAG 知识库。"""
     engine = get_rag_engine()
     return {"knowledge_bases": engine.list_kbs()}
 
 
 @app.delete("/api/kb/{kb_name}")
-async def delete_kb(kb_name: str):
+async def delete_kb(
+    kb_name: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """删除指定名称的知识库。"""
     engine = get_rag_engine()
     if engine.get_kb(kb_name) is None:
@@ -638,6 +777,7 @@ async def delete_kb(kb_name: str):
 async def ingest_files(
     files: list[UploadFile] = File(...),
     kb_name: str = Form(...),
+    user: UserInfo = Depends(get_current_user),
 ):
     """向指定知识库摄入文档文件（支持 PDF/DOCX/MD/TXT）。"""
     engine = get_rag_engine()

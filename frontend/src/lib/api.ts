@@ -1,12 +1,22 @@
 import { API_BASE_URL } from "./config";
+import { getToken } from "./auth";
 import type { CancelTaskResponse, FileListResponse, SessionDetail, SessionListResponse, TaskResponse, UploadResponse } from "../types";
 
 function apiUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
 
+function authHeader(): Record<string, string> {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
+  const headers: Record<string, string> = {
+    ...authHeader(),
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+  const response = await fetch(input, { ...init, headers });
   const contentType = response.headers.get("content-type") || "";
   const payload = contentType.includes("application/json")
     ? await response.json()
