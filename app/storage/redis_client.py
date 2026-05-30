@@ -3,15 +3,13 @@ Redis 客户端管理。
 
 提供异步 Redis 客户端的创建、关闭，以及热状态操作的辅助方法。
 """
-import os
 from typing import Optional
 
 import redis.asyncio as aioredis
-from dotenv import find_dotenv, load_dotenv
 
-load_dotenv(find_dotenv())
+from app.config import settings
 
-REDIS_URI = os.getenv("REDIS_URI", "redis://:deepagents@localhost:6379/0")
+REDIS_URI = settings.REDIS_URI
 
 _client: Optional[aioredis.Redis] = None
 

@@ -5,17 +5,15 @@
 后续主智能体和子智能体都从这里导入 model，避免在多个文件里重复加载环境变量
 """
 
-import os
-
-from dotenv import find_dotenv, load_dotenv
 from langchain.chat_models import init_chat_model
 
-# find_dotenv 会从当前目录向上查找 .env，适合脚本和 Web 服务从不同入口启动的场景
-load_dotenv(find_dotenv())
+from app.config import settings
 
-# 使用 OpenAI 兼容协议接入 DeepSeek 模型；具体模型名由 .env 中的 LLM_DEEPSEEK_MODEL 控制
+# 使用 OpenAI 兼容协议接入 DeepSeek 模型；具体模型名由 settings.LLM_MODEL 控制
 model = init_chat_model(
-    model=os.getenv("LLM_DEEPSEEK_MODEL"),
+    model=settings.LLM_MODEL,
     model_provider="openai",
+    api_key=settings.LLM_API_KEY,
+    base_url=settings.LLM_BASE_URL,
     extra_body={"thinking": {"type": "disabled"}},
 )

@@ -4,18 +4,11 @@ PostgreSQL 连接池管理与 Schema 初始化。
 提供 asyncpg 连接池的创建、关闭，以及启动时自动建表。
 """
 import asyncio
-import os
 from pathlib import Path
 
 import asyncpg
-from dotenv import find_dotenv, load_dotenv
 
-load_dotenv(find_dotenv())
-
-POSTGRES_URI = os.getenv(
-    "POSTGRES_URI",
-    "postgresql://deepagents:deepagents@localhost:5432/deepagents",
-)
+from app.config import settings
 
 _pool: asyncpg.Pool | None = None
 _lock = asyncio.Lock()
@@ -30,10 +23,10 @@ async def get_pool() -> asyncpg.Pool:
         if _pool is not None:
             return _pool
         _pool = await asyncpg.create_pool(
-            POSTGRES_URI,
-            min_size=2,
-            max_size=10,
-            command_timeout=30,
+            settings.POSTGRES_URI,
+            min_size=settings.DB_POOL_MIN_SIZE,
+            max_size=settings.DB_POOL_MAX_SIZE,
+            command_timeout=settings.DB_COMMAND_TIMEOUT,
         )
         return _pool
 

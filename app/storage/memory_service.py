@@ -6,17 +6,14 @@
 - 长期记忆：跨会话事实提取 + pgvector 语义检索
 """
 import json
-import os
 import re
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from dotenv import find_dotenv, load_dotenv
-
-load_dotenv(find_dotenv())
+from app.config import settings
 
 # embedding 维度：BAAI/bge-small-zh-v1.5 默认 512
-EMBEDDING_DIM = int(os.getenv("MEMORY_EMBEDDING_DIM", "512"))
+EMBEDDING_DIM = settings.EMBEDDING_DIM
 
 
 class MemoryService:
@@ -29,10 +26,7 @@ class MemoryService:
         """懒加载 embedding 模型（复用 RAG 基础设施）。"""
         if self._embedding_model is None:
             from sentence_transformers import SentenceTransformer
-            model_name = os.getenv(
-                "EMBEDDING_MODEL",
-                os.getenv("SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
-            )
+            model_name = settings.EMBEDDING_MODEL
             self._embedding_model = SentenceTransformer(model_name)
         return self._embedding_model
 

@@ -6,15 +6,11 @@ list_sql_tables 用于发现真实表名，get_table_data 用于预览字段和�
 execute_sql_query 用于在确认结构后执行自定义查询。
 """
 
-import os
-
-from dotenv import load_dotenv
 from langchain_core.tools import tool
 from mysql.connector import Error, connect
 
 from app.api.monitor import monitor
-
-load_dotenv()
+from app.config import settings
 
 
 # 集中读取数据库配置，后续三个工具都复用这份连接参数
@@ -26,15 +22,15 @@ def get_db_config():
     :return: mysql.connector.connect 可直接使用的连接参数
     """
     config = {
-        "host": os.getenv("MYSQL_HOST", "localhost"),
-        "port": int(os.getenv("MYSQL_PORT", "3306")),
-        "user": os.getenv("MYSQL_USER"),
-        "password": os.getenv("MYSQL_PASSWORD"),
-        "database": os.getenv("MYSQL_DATABASE"),
-        "charset": os.getenv("MYSQL_CHARSET", "utf8mb4"),
-        "collation": os.getenv("MYSQL_COLLATION", "utf8mb4_unicode_ci"),
+        "host": settings.MYSQL_HOST,
+        "port": settings.MYSQL_PORT,
+        "user": settings.MYSQL_USER,
+        "password": settings.MYSQL_PASSWORD,
+        "database": settings.MYSQL_DATABASE,
+        "charset": settings.MYSQL_CHARSET,
+        "collation": settings.MYSQL_COLLATION,
+        "sql_mode": settings.MYSQL_SQL_MODE,
         "autocommit": True,
-        "sql_mode": os.getenv("MYSQL_SQL_MODE", "TRADITIONAL"),
     }
 
     # 去掉未配置的可选项，避免把 None 传给 mysql.connector 造成连接参数异常

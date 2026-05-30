@@ -12,14 +12,11 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 from deepagents import create_deep_agent
-import os
 
-from dotenv import find_dotenv, load_dotenv
 from langgraph.checkpoint.postgres import PostgresSaver
 
-load_dotenv(find_dotenv())
-
 from app.agent.llm import model
+from app.config import settings
 from app.agent.prompts import main_agent_content
 from app.agent.subagents.database_query_agent import database_query_agent
 from app.agent.subagents.knowledge_base_agent import knowledge_base_agent
@@ -50,10 +47,7 @@ def _build_main_agent(current_date: str):
 
     使用 PostgresSaver 替代 InMemorySaver，实现检查点持久化。
     """
-    postgres_uri = os.getenv(
-        "POSTGRES_URI",
-        "postgresql://deepagents:deepagents@localhost:5432/deepagents",
-    )
+    postgres_uri = settings.POSTGRES_SYNC_URI
     checkpointer = PostgresSaver.from_conn_string(postgres_uri)
     return create_deep_agent(
         model=model,

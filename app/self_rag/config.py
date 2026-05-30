@@ -9,13 +9,12 @@ from pathlib import Path
 
 from dotenv import find_dotenv, load_dotenv
 
+from app.config import settings
+
 load_dotenv(find_dotenv())
 
 # 统一嵌入模型配置：优先读 EMBEDDING_MODEL，兼容旧 SELF_RAG_EMBEDDING_MODEL
-EMBEDDING_MODEL = os.getenv(
-    "EMBEDDING_MODEL",
-    os.getenv("SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
-)
+EMBEDDING_MODEL = settings.EMBEDDING_MODEL
 
 # ChromaDB 持久化目录，默认在 app 同级
 _base = Path(__file__).resolve().parents[1]
@@ -49,7 +48,7 @@ HYBRID_TOP_K = int(os.getenv("SELF_RAG_HYBRID_TOP_K", "4"))
 # LLM 关键词提取预留开关（默认关闭）
 KEYWORD_EXTRACTION = os.getenv("SELF_RAG_KEYWORD_EXTRACTION", "false").lower() == "true"
 
-# LLM 配置沿用项目现有设置
-LLM_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
-LLM_API_KEY = os.getenv("OPENAI_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_DEEPSEEK_MODEL", "deepseek-chat")
+# LLM 配置从统一配置模块读取
+LLM_BASE_URL = settings.LLM_BASE_URL
+LLM_API_KEY = settings.LLM_API_KEY
+LLM_MODEL = settings.LLM_MODEL

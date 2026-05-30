@@ -5,20 +5,17 @@ Tavily 网络搜索工具模块
 工具内部会先通过 monitor 上报调用参数，再请求 Tavily API 返回结构化搜索结果
 """
 
-import os
 from typing import Literal
 
-from dotenv import load_dotenv
 from langchain_core.tools import tool
 from tavily import TavilyClient
 
 from app.api.monitor import monitor
-
-load_dotenv()
+from app.config import settings
 
 
 # TavilyClient 是实际访问搜索服务的客户端；模块级复用可避免每次工具调用重复初始化
-tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+tavily_client = TavilyClient(api_key=settings.TAVILY_API_KEY)
 
 
 # @tool 会把函数签名和 docstring 暴露给 DeepAgents，模型据此决定是否调用以及如何填参
