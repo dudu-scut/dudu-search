@@ -497,6 +497,9 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
         "run_agent_task", request.query, thread_id, user.id, user.group_id,
     )
 
+    # 存储 thread_id → job_id 映射，方便取消时查找 ARQ job
+    await redis.set(f"task_job:{thread_id}", job.job_id, ex=3600)
+
     logger.info("任务已入队", thread_id=thread_id, job_id=job.job_id)
 
     return {
@@ -511,28 +514,50 @@ async def cancel_task(thread_id: str, user: UserInfo = Depends(get_current_user)
     """
     取消指定 thread_id 对应的后台 Agent 任务。
 
-    注意：取消会向 asyncio.Task 注入 CancelledError。若底层第三方工具正在执行不可中断
-    的同步阻塞调用，任务可能需要等该调用返回后才会真正结束。
+    支持两种场景：
+    1. 任务还在队列中（queued）→ 通过 ARQ abort 从队列移除
+    2. 任务已在执行中（running）→ 设置 Redis 取消信号，Worker 定期检查
     """
-    task = active_tasks.get(thread_id)
-    if not task or task.done():
-        active_tasks.pop(thread_id, None)
+    from app.storage.redis_client import get_redis_client
+    redis = await get_redis_client()
+
+    # 1. 查找 ARQ job_id
+    job_id = await redis.get(f"task_job:{thread_id}")
+    if not job_id:
+        # 兼容旧逻辑：检查 active_tasks
+        task = active_tasks.get(thread_id)
+        if task and not task.done():
+            task.cancel()
+            return {"status": "cancelled", "thread_id": thread_id}
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
 
-    # 先发出取消信号，再短暂等待协程响应；若底层阻塞中，则返回 cancelling 给前端继续展示状态
-    task.cancel()
-    try:
-        await asyncio.wait_for(task, timeout=1.0)
-    except asyncio.CancelledError:
-        _forget_task(thread_id, task)
-        return {"status": "cancelled", "thread_id": thread_id}
-    except asyncio.TimeoutError:
-        return {"status": "cancelling", "thread_id": thread_id}
-    except Exception as e:
-        _forget_task(thread_id, task)
-        return {"status": "cancelled", "thread_id": thread_id, "message": str(e)}
+    # 2. 设置 Redis 取消信号（Worker 会检查并主动抛出 CancelledError）
+    await redis.set(f"cancel:{thread_id}", "1", ex=3600)
 
-    _forget_task(thread_id, task)
+    # 3. 尝试从 ARQ 队列中 abort（如果任务尚未被执行）
+    arq_client = request.app.state.arq_client
+    try:
+        job = await arq_client.get_job(job_id)
+        if job:
+            await job.abort()
+    except Exception:
+        pass  # job 可能已经不在队列中了
+
+    # 4. 更新 session 状态
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE sessions SET status = 'cancelled' WHERE thread_id = $1",
+                thread_id,
+            )
+    except Exception:
+        pass
+
+    # 5. 清理映射
+    await redis.delete(f"task_job:{thread_id}")
+
     return {"status": "cancelled", "thread_id": thread_id}
 
 

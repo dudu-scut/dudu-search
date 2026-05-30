@@ -45,10 +45,30 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
     set_current_group_id(group_id)
     set_session_context(thread_id)
 
+    import asyncio as _asyncio
+
+    async def _check_cancelled():
+        """轮询 Redis 取消信号。"""
+        from app.storage.redis_client import get_redis_client
+        redis = await get_redis_client()
+        while True:
+            cancelled = await redis.get(f"cancel:{thread_id}")
+            if cancelled:
+                return True
+            await _asyncio.sleep(0.5)
+
     TASK_TOTAL.labels(status="started").inc()
     ACTIVE_TASKS.inc()
 
     with TASK_DURATION.time():
+        cancel_event = _asyncio.Event()
+
+        async def _watch_cancel():
+            if await _check_cancelled():
+                cancel_event.set()
+
+        cancel_watcher = _asyncio.create_task(_watch_cancel())
+
         try:
             # 更新状态为 running
             pool = await get_pool()
@@ -58,9 +78,33 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
                     thread_id,
                 )
 
-            # 执行 Agent
+            # 启动前再次检查取消信号
+            from app.storage.redis_client import get_redis_client
+            redis = await get_redis_client()
+            if await redis.get(f"cancel:{thread_id}"):
+                raise _asyncio.CancelledError("任务已被用户取消")
+
+            # 执行 Agent（带取消监听）
             from app.agent.main_agent import run_deep_agent
-            await run_deep_agent(query, thread_id)
+            agent_task = _asyncio.create_task(run_deep_agent(query, thread_id))
+
+            # 等待 agent 完成或取消信号
+            done, pending = await _asyncio.wait(
+                [agent_task, _asyncio.create_task(cancel_event.wait())],
+                return_when=_asyncio.FIRST_COMPLETED,
+            )
+
+            # 取消信号先到达 → 取消 agent
+            if cancel_event.is_set():
+                agent_task.cancel()
+                try:
+                    await agent_task
+                except _asyncio.CancelledError:
+                    pass
+                raise _asyncio.CancelledError("任务已被用户取消")
+
+            # agent 正常完成
+            await agent_task  # 获取可能的异常
 
             # 标记完成
             async with pool.acquire() as conn:
@@ -70,6 +114,19 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
                 )
             TASK_TOTAL.labels(status="completed").inc()
             task_logger.info("任务执行完成")
+
+        except _asyncio.CancelledError as e:
+            TASK_TOTAL.labels(status="cancelled").inc()
+            task_logger.info("任务已被取消", reason=str(e))
+            try:
+                pool = await get_pool()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE sessions SET status = 'cancelled' WHERE thread_id = $1",
+                        thread_id,
+                    )
+            except Exception:
+                task_logger.error("无法更新任务取消状态")
 
         except Exception as e:
             TASK_TOTAL.labels(status="failed").inc()
@@ -85,12 +142,16 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
                 task_logger.error("无法更新任务失败状态")
             raise  # ARQ 会根据 max_tries 决定是否重试
         finally:
+            cancel_watcher.cancel()
             ACTIVE_TASKS.dec()
             # 释放用户并发配额
             try:
                 from app.storage.redis_client import get_redis_client
                 redis = await get_redis_client()
                 await redis.decr(f"user_tasks:{user_id}")
+                # 清理取消信号
+                await redis.delete(f"cancel:{thread_id}")
+                await redis.delete(f"task_job:{thread_id}")
             except Exception:
                 pass
 
