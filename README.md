@@ -500,7 +500,7 @@ uv run python -m app.tools.tavily_tool
 | `REDIS_HOST`              | Redis 主机       | localhost                  |
 | `REDIS_PORT`              | Redis 端口       | 6379                       |
 | `REDIS_PASSWORD`          | Redis 密码       | deepagents                 |
-| `SELF_RAG_EMBEDDING_MODEL` | 嵌入模型          | BAAI/bge-small-zh-v1.5     |
+| `EMBEDDING_MODEL` | 嵌入模型（已替代 `SELF_RAG_EMBEDDING_MODEL`） | BAAI/bge-small-zh-v1.5     |
 | `SELF_RAG_TOP_K`           | 检索返回数         | 4                          |
 | `SELF_RAG_BM25_ENABLED`    | 启用 BM25       | true                       |
 

@@ -30,7 +30,8 @@ class MemoryService:
         if self._embedding_model is None:
             from sentence_transformers import SentenceTransformer
             model_name = os.getenv(
-                "SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5"
+                "EMBEDDING_MODEL",
+                os.getenv("SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
             )
             self._embedding_model = SentenceTransformer(model_name)
         return self._embedding_model

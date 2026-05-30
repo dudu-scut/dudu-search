@@ -108,7 +108,7 @@ async def init_schema() -> None:
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 memory_type VARCHAR(32) NOT NULL,
                 content TEXT NOT NULL,
-                embedding vector(1536),
+                embedding vector(512),
                 source_thread_id VARCHAR(64),
                 importance FLOAT DEFAULT 0.5,
                 access_count INTEGER DEFAULT 0,
@@ -120,6 +120,31 @@ async def init_schema() -> None:
         await conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_memories_type
             ON long_term_memories(memory_type);
+        """)
+
+        # 迁移：确保 embedding 列维度为 512（修复旧数据库的 1536 维度问题）
+        await conn.execute("""
+            DO $$
+            DECLARE
+                current_dim integer;
+            BEGIN
+                -- Check current embedding dimension via pg_attribute
+                SELECT a.atttypmod INTO current_dim
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                WHERE c.relname = 'long_term_memories'
+                AND a.attname = 'embedding'
+                AND a.attnum > 0;
+
+                -- vector(1536) has atttypmod = 1536 + 4 = 1540
+                -- vector(512)  has atttypmod = 512  + 4 = 516
+                -- Only migrate if the dimension is not already 512
+                IF current_dim IS NOT NULL AND current_dim != 516 THEN
+                    RAISE NOTICE 'Migrating long_term_memories embedding from dimension % to 512', current_dim - 4;
+                    DELETE FROM long_term_memories;
+                    ALTER TABLE long_term_memories ALTER COLUMN embedding TYPE vector(512);
+                END IF;
+            END $$;
         """)
 
         print("[DB] Schema initialized successfully")

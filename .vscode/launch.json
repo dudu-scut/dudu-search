@@ -2,10 +2,10 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Run app.agent.graph",
+            "name": "Python: Main Agent",
             "type": "debugpy",
             "request": "launch",
-            "module": "app.agent.graph",
+            "module": "app.agent.main_agent",
             "cwd": "${workspaceFolder}",
             "env": {
                 "PYTHONPATH": "${workspaceFolder}"

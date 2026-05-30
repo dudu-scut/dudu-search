@@ -11,7 +11,9 @@
 - **Web**: FastAPI + WebSocket，`app/api/server.py`
 - **包管理**: uv（`pyproject.toml` + `uv.lock`），Python >=3.12,<3.13
 - **自建 RAG**: ChromaDB（嵌入式持久化）+ sentence-transformers（`BAAI/bge-small-zh-v1.5`）+ jieba 分词 + BM25 稀疏检索，位于 `app/self_rag/`
-- **数据库**: MySQL，通过 `mysql-connector-python` 直连
+- **数据库**: PostgreSQL 16 + pgvector（向量数据库），通过 `asyncpg` 直连
+- **缓存**: Redis 7，用于活跃任务注册和热状态存储
+- **记忆系统**: 基于 pgvector 的语义记忆检索，支持会话持久化和跨会话记忆复用
 - **网络搜索**: Tavily API
 - **文档生成**: Markdown 直写 + Markdown→PDF（reportlab）
 
@@ -23,7 +25,7 @@ deepsearch-agents/
 │   ├── agent/
 │   │   ├── main_agent.py          # 主智能体组装 + run_deep_agent() 异步入口
 │   │   ├── llm.py                 # LLM 初始化（DeepSeek + OpenAI 兼容协议）
-│   │   ├── prompts.py             # YAML 提示词加载
+│   │   ├── prompts.py              # YAML 提示词加载
 │   │   └── subagents/
 │   │       ├── network_search_agent.py   # Tavily 网络搜索子智能体
 │   │       ├── database_query_agent.py   # MySQL 数据库查询子智能体
@@ -34,6 +36,10 @@ deepsearch-agents/
 │   │   ├── server.py              # FastAPI 入口（REST + WebSocket + KB管理API）
 │   │   ├── monitor.py             # ToolMonitor：工具调用→WebSocket 事件推送
 │   │   └── context.py             # ContextVar：协程级 session_dir/thread_id
+│   ├── storage/                    # 存储持久化模块
+│   │   ├── db.py                 # PostgreSQL 连接池 + Schema（4表）
+│   │   ├── redis_client.py       # Redis 客户端 + 热状态操作
+│   │   └── memory_service.py     # 记忆服务：检索/存储/巩固 Pipeline
 │   ├── tools/
 │   │   ├── tavily_tool.py         # internet_search 工具
 │   │   ├── db_tools.py            # list_sql_tables / get_table_data / execute_sql_query
@@ -48,7 +54,7 @@ deepsearch-agents/
 │       ├── path_utils.py          # resolve_path：虚拟路径→本地会话目录
 │       └── word_converter.py      # Markdown→PDF 底层转换（reportlab）
 ├── frontend/                      # 前端（Vite）
-├── docker/                        # MySQL Docker 部署
+├── docker/                        # PostgreSQL + Redis Docker 部署
 ├── pyproject.toml
 └── .env                           # 环境变量（不提交）
 ```
@@ -74,6 +80,69 @@ deepsearch-agents/
 - **会话隔离**：每次任务创建 `output/session_{thread_id}/` 工作目录，上传文件先存到 `updated/session_{thread_id}/` 再复制到工作目录
 - **ContextVar 传递上下文**：`session_dir` 和 `thread_id` 通过 `contextvars.ContextVar` 在协程链路中隐式传递，工具层无需显式传参
 - **monitor 埋点**：所有工具调用和子智能体调用都通过 `monitor.report_tool()` / `monitor.report_assistant()` 上报，由 `ToolMonitor._emit()` 通过 WebSocket 推送给前端，同时保留控制台输出作为保底
+
+### 存储持久化与记忆系统
+
+#### 架构概览
+
+```
+用户请求 → FastAPI
+    ├─ Redis: 活跃任务注册 (替代内存 dict)
+    ├─ PostgreSQL:
+    │   ├─ sessions 表: 会话元数据
+    │   ├─ messages 表: 对话历史
+    │   ├─ agent_events 表: 执行轨迹
+    │   └─ long_term_memories 表: 长期记忆 (pgvector)
+    ├─ PostgresSaver: LangGraph 检查点持久化 (替代 InMemorySaver)
+    └─ MemoryService:
+        ├─ 检索: 语义检索 (pgvector cosine) + 会话摘要
+        ├─ 注入: 新对话时自动注入相关记忆上下文
+        └─ 巩固: 会话结束 → LLM 摘要 + 事实提取 → 长期记忆
+```
+
+#### 数据库 Schema
+
+`app/storage/db.py` 初始化 4 张表：
+- **sessions**: 会话元数据（thread_id, title, summary, status, metadata）
+- **messages**: 对话消息（thread_id, role, content, tool_calls, token_count）
+- **agent_events**: Agent 执行轨迹（thread_id, event_type, message, payload）
+- **long_term_memories**: 长期记忆（memory_type, content, embedding vector(512), importance）
+
+#### MemoryService 核心功能
+
+`app/storage/memory_service.py` 提供：
+
+1. **语义检索** (`retrieve_relevant`): 使用 pgvector 的余弦相似度进行向量检索
+2. **会话摘要检索** (`retrieve_recent_summaries`): 获取最近会话摘要
+3. **上下文构建** (`build_context`): 为新对话构建记忆上下文块
+4. **记忆存储** (`store_memory`): 存储带向量嵌入的长期记忆
+5. **会话巩固** (`consolidate_session`): 会话结束后调用 LLM 提取摘要和事实
+
+#### 记忆类型
+
+支持 4 种记忆类型：
+- **fact**: 事实
+- **preference**: 偏好
+- **episodic**: 经历
+- **semantic**: 知识
+
+#### 新增 API 端点
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/api/sessions` | 历史会话列表（分页、按时间倒序） |
+| GET | `/api/sessions/{thread_id}` | 会话详情（消息 + 事件） |
+| DELETE | `/api/sessions/{thread_id}` | 删除会话（级联删除消息/事件） |
+| GET | `/api/memories` | 长期记忆列表（按类型筛选） |
+| POST | `/api/memories` | 手动创建记忆 |
+| DELETE | `/api/memories/{memory_id}` | 删除记忆 |
+
+#### 主智能体集成
+
+`app/agent/main_agent.py` 中的 `run_deep_agent()`:
+- 会话开始：调用 `memory_service.build_context()` 注入记忆上下文
+- 会话执行：使用 `PostgresSaver` 持久化 LangGraph 检查点
+- 会话结束：异步触发 `_run_memory_consolidation()` 巩固记忆
 
 ### 自建 RAG 链路
 
@@ -123,7 +192,18 @@ RAGEngine 是单例（`get_rag_engine()`），首次访问时加载 embedding �
 # 安装依赖
 uv sync
 
+# 启动数据库服务 (PostgreSQL + Redis)
+cd docker
+docker compose up -d postgres redis
+
+# 验证 PostgreSQL 连接
+docker compose exec postgres psql -U deepagents -d deepagents -c "SELECT 1;"
+
+# 验证 Redis 连接
+docker compose exec redis redis-cli -a deepagents ping
+
 # 启动后端 (端口 8000)
+cd ..
 uv run python -m app.api.server
 
 # 运行主智能体（脚本调试模式）
@@ -146,8 +226,11 @@ uv run python -m app.tools.tavily_tool
 | `OPENAI_API_KEY` | LLM API 密钥 |
 | `LLM_DEEPSEEK_MODEL` | 模型名（默认 `deepseek-chat`） |
 | `TAVILY_API_KEY` | Tavily 搜索 API 密钥 |
-| `MYSQL_HOST/PORT/USER/PASSWORD/DATABASE` | MySQL 连接配置 |
-| `SELF_RAG_EMBEDDING_MODEL` | 嵌入模型（默认 `BAAI/bge-small-zh-v1.5`） |
+| `POSTGRES_HOST/PORT/USER/PASSWORD/DB` | PostgreSQL 连接配置 |
+| `POSTGRES_URI` | PostgreSQL 连接 URI（可选，优先级高于单个变量） |
+| `REDIS_HOST/PORT/PASSWORD` | Redis 连接配置 |
+| `MEMORY_EMBEDDING_DIM` | 记忆向量维度（默认 512） |
+| `EMBEDDING_MODEL` | 嵌入模型（默认 `BAAI/bge-small-zh-v1.5`），已替代 `SELF_RAG_EMBEDDING_MODEL` |
 | `SELF_RAG_TOP_K` | 稠密检索返回片段数（默认 4） |
 | `SELF_RAG_PARENT_CHUNK_SIZE` | 父块大小，字符数（默认 1000） |
 | `SELF_RAG_CHILD_CHUNK_SIZE` | 子块大小，字符数（默认 200） |

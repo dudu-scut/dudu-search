@@ -11,7 +11,11 @@ from dotenv import find_dotenv, load_dotenv
 
 load_dotenv(find_dotenv())
 
-EMBEDDING_MODEL = os.getenv("SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+# 统一嵌入模型配置：优先读 EMBEDDING_MODEL，兼容旧 SELF_RAG_EMBEDDING_MODEL
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    os.getenv("SELF_RAG_EMBEDDING_MODEL", "BAAI/bge-small-zh-v1.5")
+)
 
 # ChromaDB 持久化目录，默认在 app 同级
 _base = Path(__file__).resolve().parents[1]
