@@ -187,7 +187,7 @@ export function useDeepAgentSession() {
       refreshFiles().catch((error: unknown) => {
         setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
       });
-    }, isRunning ? 2500 : 6000);
+    }, isRunning ? 15000 : 30000);
 
     return () => window.clearInterval(timer);
   }, [isRunning, refreshFiles, sessionPath]);

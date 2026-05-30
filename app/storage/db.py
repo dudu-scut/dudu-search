@@ -199,4 +199,24 @@ async def init_schema() -> None:
             ON CONFLICT (id) DO NOTHING;
         """)
 
+        # 补充 agent_events 外键约束（幂等）
+        await conn.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1 FROM information_schema.table_constraints
+                    WHERE constraint_name = 'fk_events_session'
+                ) THEN
+                    -- 先清理孤儿记录
+                    DELETE FROM agent_events
+                    WHERE thread_id NOT IN (SELECT thread_id FROM sessions);
+
+                    ALTER TABLE agent_events
+                    ADD CONSTRAINT fk_events_session
+                    FOREIGN KEY (thread_id) REFERENCES sessions(thread_id)
+                    ON DELETE CASCADE;
+                END IF;
+            END $$;
+        """)
+
         logger.info("Schema 初始化完成")

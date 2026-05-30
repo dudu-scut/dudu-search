@@ -76,11 +76,22 @@ class ToolMonitor:
             except Exception:
                 pass
 
+        # 写入 Redis 缓存（fire-and-forget，便于断线重连恢复）
+        thread_id = get_thread_context()
+        if thread_id:
+            try:
+                from app.storage.redis_client import cache_event
+                import json as _json
+                import asyncio as _asyncio
+                _asyncio.ensure_future(cache_event(thread_id, payload))
+            except Exception:
+                pass
+
         # 持久化事件到 PostgreSQL（fire-and-forget，不阻塞主流程）
         try:
             import asyncio as _asyncio
             _asyncio.ensure_future(_persist_monitor_event(
-                thread_id=get_thread_context(),
+                thread_id=thread_id,
                 event_type=event_type,
                 message=message,
                 payload=data or {},

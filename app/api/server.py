@@ -757,22 +757,67 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     """
     WebSocket 实时通讯核心接口 (Real-time Communication)。
 
-    连接建立后，ConnectionManager 会用 thread_id 保存 WebSocket。monitor 后续
-    发送事件时只需要按 thread_id 查找连接，就能把进度推给对应页面。循环中的
-    receive_text 用于接收前端心跳，避免连接空闲断开。
+    连接建立后，先推送历史事件（断线重连恢复），再进入实时推送循环。
+    ConnectionManager 用 thread_id 保存 WebSocket。monitor 后续发送事件时
+    只需要按 thread_id 查找连接，就能把进度推给对应页面。
     """
     logger.info("WebSocket 连接请求", thread_id=thread_id)
 
-    # 连接建立后立即按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
-    await manager.connect(websocket, thread_id)
+    # 先接受连接
+    await websocket.accept()
+
+    # 1. 发送历史事件（断线重连恢复）
+    try:
+        from app.storage.redis_client import get_redis
+        redis = await get_redis()
+        key = f"ws:events:{thread_id}"
+
+        # 先从 Redis 拉缓存事件
+        cached = await redis.lrange(key, 0, -1)
+        if cached:
+            import json
+            for event_json in reversed(cached):  # 最旧在前
+                event = json.loads(event_json)
+                await websocket.send_json({"type": "replay", "event": event})
+
+        # Redis 无数据，从 PostgreSQL 查
+        if not cached:
+            from app.storage.db import get_pool
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT event_type, message, payload, created_at
+                       FROM agent_events
+                       WHERE thread_id = $1
+                       ORDER BY created_at ASC""",
+                    thread_id,
+                )
+                for row in rows:
+                    await websocket.send_json({
+                        "type": "replay",
+                        "event": {
+                            "type": row["event_type"],
+                            "message": row["message"],
+                            "payload": json.loads(row["payload"]) if isinstance(row["payload"], str) else row["payload"],
+                            "timestamp": row["created_at"].isoformat(),
+                        },
+                    })
+
+        if cached:
+            logger.info("历史事件已推送", thread_id=thread_id, count=len(cached))
+
+    except Exception as e:
+        logger.warning("历史事件推送失败", thread_id=thread_id, exc_info=True)
+
+    # 2. 连接建立后按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
+    manager.active_connections[thread_id] = websocket
 
     try:
         while True:
             # 前端通常发送 ping 心跳；服务端回复 pong，顺便维持连接活跃
             data = await websocket.receive_text()
-            await websocket.send_json(
-                {"type": "pong", "message": f"服务端已收到: {data}"}
-            )
+            if data == "ping":
+                await websocket.send_text("pong")
 
     except WebSocketDisconnect:
         # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接

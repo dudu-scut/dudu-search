@@ -5,9 +5,9 @@
 """
 
 from arq.connections import RedisSettings
-from arq.worker import create_worker
 from app.config import settings as app_settings
 from app.logging_config import get_logger
+from app.tasks.cleanup import cleanup_expired_sessions
 
 logger = get_logger("worker")
 
@@ -120,6 +120,15 @@ class WorkerSettings:
     max_tries = 3  # 最多执行 3 次（1 次原始 + 2 次重试）
     retry_jitter = False
     health_check_interval = 10
+
+    # 定时任务
+    cron_jobs = [
+        # 每天凌晨 3 点执行过期会话清理
+        {
+            "coroutine": cleanup_expired_sessions,
+            "cron": "0 3 * * *",  # 分 时 日 月 周
+        }
+    ]
 
     # 启动和关闭
     on_startup = startup

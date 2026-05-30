@@ -35,7 +35,7 @@ export default function SessionList({ activeThreadId, onSelect, onNewSession }: 
 
   useEffect(() => {
     loadSessions();
-    const timer = setInterval(loadSessions, 10000);
+    const timer = setInterval(loadSessions, 30000);
     return () => clearInterval(timer);
   }, [loadSessions]);
 

@@ -68,6 +68,18 @@ async def cache_ws_event(thread_id: str, event_json: str, ttl: int = 604800) -> 
     await pipe.execute()
 
 
+async def cache_event(thread_id: str, event: dict) -> None:
+    """将事件字典写入 Redis 列表（最新在前）。保留最近 500 条，7 天过期。"""
+    import json
+    r = await get_redis()
+    key = f"ws:events:{thread_id}"
+    pipe = r.pipeline()
+    pipe.lpush(key, json.dumps(event, ensure_ascii=False, default=str))
+    pipe.ltrim(key, 0, 499)  # 保留最近 500 条
+    pipe.expire(key, 7 * 24 * 3600)  # 7 天 TTL
+    await pipe.execute()
+
+
 async def get_cached_ws_events(thread_id: str, count: int = 50) -> list[str]:
     """获取缓存的 WebSocket 事件。"""
     r = await get_redis()
