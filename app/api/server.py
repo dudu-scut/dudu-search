@@ -7,13 +7,18 @@ WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执�
 """
 
 import asyncio
+import mimetypes
+import os
 import re
 import shutil
+import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
+import jwt as pyjwt
 import uvicorn
 from fastapi import (
     Depends,
@@ -21,6 +26,7 @@ from fastapi import (
     File,
     Form,
     HTTPException,
+    Query,
     Request,
     UploadFile,
     WebSocket,
@@ -29,12 +35,16 @@ from fastapi import (
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
 from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, require_admin
-from app.auth.jwt import create_access_token, hash_password, verify_password
-from app.exceptions import AuthError, DeepAgentsError, ValidationError
+from app.auth.jwt import create_access_token, decode_token, hash_password, verify_password
+from app.config import settings
+from app.exceptions import AuthError, DeepAgentsError, PermissionDeniedError, ValidationError
 from app.self_rag.config import DOC_STORE_DIR
 from app.self_rag.engine import get_rag_engine
 from app.storage.redis_client import (
@@ -166,22 +176,40 @@ output_dir.mkdir(exist_ok=True)
 updated_dir = project_root / "updated"
 updated_dir.mkdir(exist_ok=True)
 
-# 教学项目通常前后端分别本地启动，这里放开跨域以便 Vite 页面直接调用 API
+# 教学项目通常前后端分别本地启动，这里根据配置收紧跨域
+origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+# ── 限流器 ──
+limiter = Limiter(
+    key_func=get_remote_address,
+    default_limits=["60/minute"],
+    storage_uri=settings.REDIS_URI,
+)
+app.state.limiter = limiter
+
+# slowapi 限流超限时的异常处理
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"error": {"code": "RATE_LIMITED", "message": "请求过于频繁，请稍后重试", "details": {}}},
+    )
 
 
 # ── 认证 API ──
 
 
 @app.post("/api/auth/register")
+@limiter.limit("3/hour")
 async def register(request: Request):
-    """用户注册。"""
+    """用户注册（限流：每 IP 每小时 3 次）。"""
     body = await request.json()
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
@@ -223,8 +251,9 @@ async def register(request: Request):
 
 
 @app.post("/api/auth/login")
+@limiter.limit("5/minute")
 async def login(request: Request):
-    """用户登录。"""
+    """用户登录（限流：每 IP 每分钟 5 次）。"""
     body = await request.json()
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
@@ -356,6 +385,53 @@ async def cancel_task(thread_id: str, user: UserInfo = Depends(get_current_user)
     return {"status": "cancelled", "thread_id": thread_id}
 
 
+# ── 文件上传安全校验 ──
+
+ALLOWED_EXTENSIONS = {
+    ext.strip().lower()
+    for ext in settings.ALLOWED_UPLOAD_EXTENSIONS.split(",")
+    if ext.strip()
+}
+
+ALLOWED_MIME_TYPES = {
+    "text/plain",
+    "text/csv",
+    "text/markdown",
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "application/json",
+}
+
+MAX_UPLOAD_BYTES = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+
+def validate_upload_file(filename: str, content_type: str, file_size: int) -> str:
+    """校验上传文件，返回错误信息字符串或空字符串表示通过。"""
+    # 检查扩展名
+    ext = os.path.splitext(filename)[1].lower()
+    if not ext or ext not in ALLOWED_EXTENSIONS:
+        return f"不支持的文件类型: {ext}。允许: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+
+    # 检查 MIME 类型（宽松匹配，允许 office 系列通配）
+    if content_type:
+        mime_matched = content_type in ALLOWED_MIME_TYPES
+        if not mime_matched:
+            if not content_type.startswith("application/vnd.openxmlformats-officedocument"):
+                return f"不支持的文件格式: {content_type}"
+
+    # 检查大小
+    if file_size > MAX_UPLOAD_BYTES:
+        size_mb = file_size / (1024 * 1024)
+        return f"文件过大 ({size_mb:.1f}MB)，上限 {settings.MAX_UPLOAD_SIZE_MB}MB"
+
+    return ""
+
+
 @app.post("/api/upload")
 async def upload_files(
     files: List[UploadFile] = File(...),
@@ -380,17 +456,27 @@ async def upload_files(
 
     saved_files = []
     for file in files:
+        # 安全校验：读取并检查文件
+        content = await file.read()
+        error = validate_upload_file(
+            file.filename or "", file.content_type or "", len(content)
+        )
+        if error:
+            raise ValidationError(error)
+
         file_path = target_dir / file.filename
-        # 直接复制文件流，避免大文件一次性读入内存
         with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            buffer.write(content)
         saved_files.append(file.filename)
 
     return {"status": "uploaded", "files": saved_files}
 
 
 @app.get("/api/download")
-async def download_file(path: str, user: UserInfo = Depends(get_current_user)):
+async def download_file(
+    path: str,
+    user: UserInfo = Depends(get_current_user),
+):
     """
     文件下载接口 (File Download)。
 
@@ -407,15 +493,32 @@ async def download_file(path: str, user: UserInfo = Depends(get_current_user)):
         output_abs = output_dir.resolve()
 
         if not abs_path.is_relative_to(output_abs):
-            return {"error": "拒绝访问: 只能下载输出目录下的文件"}
+            raise PermissionDeniedError("拒绝访问: 只能下载输出目录下的文件")
+    except PermissionDeniedError:
+        raise
     except Exception:
         return {"error": "无效的路径参数"}
 
     if not abs_path.exists():
-        return {"error": "文件不存在"}
+        raise HTTPException(status_code=404, detail="文件不存在")
 
     # FileResponse 会以流式响应返回文件内容，并让浏览器使用原文件名下载
     return FileResponse(abs_path, filename=abs_path.name)
+
+
+def generate_download_url(file_path: str, user_id: str) -> str:
+    """生成带鉴权的下载 URL（1小时有效）。
+
+    前端调用此函数获取安全的临时下载链接。
+    """
+    expires = int(time.time()) + 3600
+    token = create_access_token(
+        user_id=user_id,
+        username="download",
+        role="user",
+        expires_delta=timedelta(hours=1),
+    )
+    return f"/api/download?path={file_path}&token={token}&expires={expires}"
 
 
 @app.get("/api/files")

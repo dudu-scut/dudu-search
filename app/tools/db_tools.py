@@ -6,6 +6,8 @@ list_sql_tables 用于发现真实表名，get_table_data 用于预览字段和�
 execute_sql_query 用于在确认结构后执行自定义查询。
 """
 
+import re
+
 from langchain_core.tools import tool
 from mysql.connector import Error, connect
 
@@ -158,6 +160,55 @@ def get_table_data(table_name) -> str:
         return f"查询出现异常：{str(e)}"
 
 
+# ── SQL 安全校验 ──
+
+# 严格的正则前缀检查（防注释/空白绕过）
+SAFE_SQL_PATTERN = re.compile(
+    r'^\s*(SELECT|SHOW|DESCRIBE|EXPLAIN|WITH)\b',
+    re.IGNORECASE,
+)
+
+MAX_SQL_ROWS = 1000
+MAX_SQL_TIMEOUT_SECONDS = 30
+
+# 危险关键字（写操作、DDL、权限变更）
+DANGEROUS_KEYWORDS = [
+    r'\bINSERT\b', r'\bUPDATE\b', r'\bDELETE\b', r'\bDROP\b',
+    r'\bALTER\b', r'\bCREATE\b', r'\bTRUNCATE\b', r'\bGRANT\b',
+    r'\bREVOKE\b', r'\bEXEC\b', r'\bEXECUTE\b', r'\bREPLACE\b',
+    r'\bLOAD\b', r'\bIMPORT\b', r'\bRENAME\b',
+]
+
+
+def validate_sql_query(query: str) -> tuple:
+    """校验 SQL 查询安全性。
+
+    规则：
+    1. 必须以 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH 开头
+    2. 不能包含危险关键字（写操作、DDL 等）
+    3. 自动追加 LIMIT（如果没有）
+
+    :return: (safe_query, error_message) — error_message 为空表示通过
+    """
+    query_stripped = query.strip()
+
+    # 1. 前缀检查
+    if not SAFE_SQL_PATTERN.match(query_stripped):
+        return "", "仅允许 SELECT/SHOW/DESCRIBE/EXPLAIN/WITH 查询"
+
+    # 2. 危险关键字检查
+    for pattern in DANGEROUS_KEYWORDS:
+        if re.search(pattern, query_stripped, re.IGNORECASE):
+            keyword = pattern.replace(r'\b', '')
+            return "", f"查询包含禁止的关键字: {keyword}"
+
+    # 3. 自动追加 LIMIT（如果没有）
+    if not re.search(r'\bLIMIT\b', query_stripped, re.IGNORECASE):
+        query_stripped = f"{query_stripped.rstrip(';')} LIMIT {MAX_SQL_ROWS}"
+
+    return query_stripped, ""
+
+
 @tool
 def execute_sql_query(query) -> str:
     """
@@ -170,57 +221,56 @@ def execute_sql_query(query) -> str:
     :return: CSV 格式数据
              1. 第一行是列信息，列之间使用英文逗号分隔
              2. 第二行开始是表数据，值之间也使用英文逗号分隔
-             3. 行和行之间使用 \n 分隔
+             3. 行和行之间使用 \\n 分隔
              例如：
-                id,name,age\n -> 列头
-                1,张三,18\n
-                1,张三,18\n
+                id,name,age\\n -> 列头
+                1,张三,18\\n
+                1,张三,18\\n
     """
     # 埋点：记录模型最终生成的 SQL，便于教学时观察是否真的落到了正确表字段上
     monitor.report_tool(
         tool_name="数据库表数据查询工具：execute_sql_query", args={"query": query}
     )
 
+    # 安全校验
+    safe_query, error = validate_sql_query(query)
+    if error:
+        return f"SQL 安全校验失败: {error}"
+
     # 获取数据库参数
     config = get_db_config()
 
-    # 自定义查询和 get_table_data 的结果处理逻辑一致：
-    # 执行 SQL -> 读取 description 得到列名 -> fetchall 得到数据 -> 拼成 CSV 返回
     try:
         with connect(**config) as conn:
             with conn.cursor() as cursor:
-                # 安全限制：生产环境只允许只读查询，防止SQL注入和误操作
-                ALLOWED_QUERY_PREFIXES = ('SELECT', 'SHOW', 'DESCRIBE', 'EXPLAIN')
-                MAX_RESULT_ROWS = 1000
-                
-                query_stripped = query.strip().upper()
-                if not any(query_stripped.startswith(prefix) for prefix in ALLOWED_QUERY_PREFIXES):
-                    return f"安全限制：仅允许只读查询（SELECT/SHOW/DESCRIBE/EXPLAIN），当前SQL为：{query[:100]}..."
-                
-                cursor.execute(query)
+                # 执行校验后的安全查询
+                cursor.execute(safe_query)
 
-                # 非查询类 SQL 没有结果集描述，这里统一返回提示，避免工具调用直接抛错给模型
                 description = cursor.description
                 if not description:
                     return f"执行自定义 SQL 语句没有查询结果，SQL 为：{query}"
-                # description => [("列1", ...), ("列2", ...)]
+
                 columns = [desc[0] for desc in description]
 
-                # rows => [(值1, 值2), (值1, 值2)]
-                # 限制返回行数，避免大数据量返回影响性能
-                rows = cursor.fetchmany(MAX_RESULT_ROWS)
-                
-                # 检查是否达到行数限制
-                if len(rows) == MAX_RESULT_ROWS:
-                    return f"查询结果超过{MAX_RESULT_ROWS}行限制，请缩小查询范围"
+                # 限制返回行数
+                rows = cursor.fetchmany(MAX_SQL_ROWS)
 
-                # 每行元组统一转为逗号分隔文本，便于模型读取和后续整理
+                if len(rows) == MAX_SQL_ROWS:
+                    # 检查是否还有更多数据
+                    has_more = cursor.fetchone() is not None
+                    truncation_note = (
+                        "\n\n> ⚠️ 结果已截断，仅显示前 1000 行。请添加更精确的 WHERE 条件缩小范围。"
+                        if has_more
+                        else ""
+                    )
+                else:
+                    truncation_note = ""
+
                 results = [",".join(map(str, row)) for row in rows]
 
-                # 第一行是列名，后续是查询数据
                 header_str = ",".join(columns)
                 data_str = "\n".join(results)
-                return f"{header_str}\n{data_str}"
+                return f"{header_str}\n{data_str}{truncation_note}"
     except Error as e:
         return f"查询出现异常：{str(e)}"
 
