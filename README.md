@@ -511,6 +511,116 @@ uv run python -m app.tools.tavily_tool
 - Windows 环境下路径使用 `/` 分隔符
 - 前端依赖安装在 `frontend/node_modules`，请勿提交到仓库
 
+## 🚀 生产部署
+
+### 前置条件
+
+- Docker Desktop 或 Docker Engine 20+
+- docker compose v2+
+
+### 快速部署
+
+**1. 配置环境变量**
+
+```bash
+cp .env.prod .env.prod.local
+# 编辑 .env.prod.local，填入真实的 API 密钥和密码
+```
+
+**2. 启动所有服务**
+
+```bash
+docker compose -f docker-compose.prod.yaml --env-file .env.prod.local up -d
+```
+
+**3. 检查服务状态**
+
+```bash
+docker compose -f docker-compose.prod.yaml ps
+curl http://localhost/ready
+```
+
+**4. 查看日志**
+
+```bash
+# 查看所有服务日志
+docker compose -f docker-compose.prod.yaml logs -f
+
+# 仅查看后端
+docker compose -f docker-compose.prod.yaml logs -f app
+
+# 仅查看 Worker
+docker compose -f docker-compose.prod.yaml logs -f worker
+```
+
+### 服务架构
+
+```
+                  ┌──────────────────┐
+                  │   Nginx (:80)    │
+                  │  前端 + 反向代理  │
+                  └────────┬─────────┘
+                           │
+              ┌────────────┼────────────┐
+              │            │            │
+        /api/* │      /ws/* │      /    │
+              ▼            ▼            ▼
+    ┌─────────────┐  WebSocket   静态文件
+    │  FastAPI    │  升级         (SPA)
+    │  (:8000)    │
+    └──────┬──────┘
+           │
+    ┌──────┼──────┐
+    │      │      │
+    ▼      ▼      ▼
+┌──────┐ ┌──────┐ ┌──────────┐
+│PostgreSQL│Redis│ │ARQ Worker│
+│(:5432) │(:6379)│ │  (x2)    │
+└──────────┘ └──────┘ └──────────┘
+```
+
+| 服务 | 端口 | 说明 |
+|------|------|------|
+| Nginx (frontend) | 80 | 前端 SPA + 反向代理 |
+| FastAPI (app) | 8000 (内网) | 后端 API + WebSocket |
+| ARQ Worker | - | 异步任务执行（默认 2 副本） |
+| PostgreSQL | 5432 (内网) | 持久化存储 + pgvector 向量检索 |
+| Redis | 6379 (内网) | 缓存 + 任务队列 |
+
+### 环境变量说明
+
+| 变量名 | 必填 | 说明 |
+|--------|------|------|
+| `LLM_API_KEY` | 是 | DeepSeek / OpenAI 兼容 API 密钥 |
+| `LLM_BASE_URL` | 否 | LLM API 地址（默认 DeepSeek） |
+| `LLM_MODEL` | 否 | 模型名称（默认 `deepseek-chat`） |
+| `TAVILY_API_KEY` | 建议 | Tavily 搜索 API 密钥 |
+| `JWT_SECRET` | 是 | JWT 签名密钥（生产务必修改为随机字符串） |
+| `POSTGRES_PASSWORD` | 是 | PostgreSQL 数据库密码 |
+| `REDIS_PASSWORD` | 是 | Redis 密码 |
+| `MYSQL_PASSWORD` | 否 | MySQL 密码（教学数据库用） |
+| `LOG_FORMAT` | 否 | 日志格式：`console`（开发）或 `json`（生产，默认） |
+| `NGINX_PORT` | 否 | 对外暴露端口（默认 80） |
+| `CORS_ORIGINS` | 否 | 允许的跨域来源（逗号分隔） |
+
+### 健康检查端点
+
+| 端点 | 用途 |
+|------|------|
+| `GET /live` | 存活探针（Kubernetes liveness） |
+| `GET /ready` | 就绪探针（Kubernetes readiness） |
+| `GET /metrics` | Prometheus 指标 |
+
+### 水平扩展
+
+Worker 服务可通过 `docker-compose.prod.yaml` 中的 `deploy.replicas` 调整副本数：
+
+```bash
+docker compose -f docker-compose.prod.yaml up -d --scale worker=4
+```
+
+后端 API 可通过在 `docker-compose.prod.yaml` 中添加端口映射后使用外部负载均衡器进行扩展。
+
 ## 许可证
 
 本项目仅供学习和研究使用。
