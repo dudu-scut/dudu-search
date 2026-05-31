@@ -29,14 +29,19 @@ def event_loop():
 def mock_db_pool():
     """Mock asyncpg 连接池 — 替代真实的 PostgreSQL 连接。"""
     with patch("app.storage.db.asyncpg.create_pool") as mock_create:
-        mock_pool = AsyncMock()
+        mock_pool = MagicMock()
         mock_conn = AsyncMock()
         mock_conn.execute = AsyncMock(return_value="OK")
         mock_conn.fetch = AsyncMock(return_value=[])
         mock_conn.fetchrow = AsyncMock(return_value=None)
         mock_conn.fetchval = AsyncMock(return_value=None)
-        mock_pool.acquire.return_value.__aenter__.return_value = mock_conn
-        mock_pool.acquire.return_value.__aexit__.return_value = None
+
+        # asyncpg.Pool.acquire() 不是协程函数，是返回异步上下文管理器的普通函数
+        _ctx_mgr = MagicMock()
+        _ctx_mgr.__aenter__ = AsyncMock(return_value=mock_conn)
+        _ctx_mgr.__aexit__ = AsyncMock(return_value=None)
+        mock_pool.acquire = MagicMock(return_value=_ctx_mgr)
+
         mock_create.return_value = mock_pool
 
         # 使 get_pool() 返回 mock pool
@@ -68,18 +73,80 @@ def mock_redis():
 
 
 @pytest.fixture
-async def test_app(mock_db_pool, mock_redis):
+def mock_limiter():
+    """Mock slowapi Limiter — 测试中完全禁用限流检查。
+
+    必须 patch ``slowapi.Limiter``（server.py 的 import 来源）以及
+    ``slowapi.extension.Limiter``（slowapi 内部的存储查找路径）。
+    """
+    import slowapi
+    import slowapi.extension as slowapi_ext
+
+    # 保存原始类以便继承
+    _Base = slowapi_ext.Limiter
+
+    class NoopLimiter(_Base):
+        """无操作限流器：limit() / shared_limit() / exempt() 均返回原函数。"""
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def limit(self, *args, **kwargs):
+            def _decorator(func):
+                return func
+            return _decorator
+
+        def shared_limit(self, *args, **kwargs):
+            def _decorator(func):
+                return func
+            return _decorator
+
+        def exempt(self, *args, **kwargs):
+            def _decorator(func):
+                return func
+            return _decorator
+
+        def reset(self, *args, **kwargs):
+            pass
+
+    with patch("slowapi.Limiter", NoopLimiter), \
+         patch.object(slowapi_ext, "Limiter", NoopLimiter):
+        yield
+
+
+@pytest.fixture
+def mock_arq():
+    """Mock ARQ 任务队列客户端 — 替代真实的 Redis 连接。"""
+    mock_arq_pool = AsyncMock()
+    mock_arq_pool.enqueue_job = AsyncMock(return_value=AsyncMock(job_id="mock-job-id"))
+    mock_arq_pool.get_job = AsyncMock(return_value=None)
+    mock_arq_pool.close = AsyncMock()
+
+    with patch("app.api.server.create_pool", AsyncMock(return_value=mock_arq_pool)):
+        yield mock_arq_pool
+
+
+@pytest.fixture
+async def test_app(mock_db_pool, mock_redis, mock_limiter, mock_arq):
     """创建 FastAPI TestClient（异步）。
 
-    依赖 mock_db_pool / mock_redis，确保服务器初始化时不连接真实服务。
+    依赖 mock_db_pool / mock_redis / mock_arq，确保服务器初始化时不连接真实服务。
+    同时重新打补丁 app.api.server.get_pool，避免模块级 import 缓存指向旧 mock。
     """
+    from unittest.mock import AsyncMock, patch
     from httpx import ASGITransport, AsyncClient
 
     from app.api.server import app
+    import app.api.server as server_module
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client
+    # server.py 在模块级执行了 ``from app.storage.db import get_pool``，
+    # 首个 test 导入时能抓到 mock_db_pool 的正确 mock，但后续 test 中
+    # Python 模块缓存会让 server.get_pool 仍指向第一个 fixture 的 mock。
+    # 这里在每次 test 开始时都把 server.get_pool 重新指向当前 mock。
+    with patch.object(server_module, "get_pool", AsyncMock(return_value=mock_db_pool)):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            yield client
 
 
 @pytest.fixture
