@@ -6,6 +6,7 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
+  HistoryOutlined,
   LogoutOutlined,
   ToolOutlined,
   UserOutlined,
@@ -17,6 +18,7 @@ import { ConversationThread } from "./components/ConversationThread";
 import LoginPage from "./components/LoginPage";
 import MemoryPanel from "./components/MemoryPanel";
 import SessionList from "./components/SessionList";
+import TaskHistory from "./components/TaskHistory";
 import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { getUser, isLoggedIn, logout } from "./lib/auth";
@@ -51,6 +53,7 @@ export default function App() {
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
   const streamRef = useRef<HTMLElement | null>(null);
   const session = useDeepAgentSession();
 
@@ -240,6 +243,13 @@ export default function App() {
             <h2>深度研搜对话</h2>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <Button
+              icon={<HistoryOutlined />}
+              onClick={() => setShowHistory((prev) => !prev)}
+              type={showHistory ? "primary" : "default"}
+            >
+              历史
+            </Button>
             <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
               {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
               {session.isRunning ? "研搜中" : "待命"}
@@ -284,6 +294,15 @@ export default function App() {
             type="error"
           />
         ) : null}
+
+        <TaskHistory
+          activeThreadId={session.threadId}
+          onSelect={(_threadId: string) => {
+            handleNewSession();
+          }}
+          visible={showHistory}
+          onClose={() => setShowHistory(false)}
+        />
 
         <section className="chat-stream-panel" ref={streamRef}>
           <ConversationThread

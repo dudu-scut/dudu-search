@@ -76,6 +76,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             rules={[
               { required: true, message: "请输入用户名" },
               { min: 3, message: "用户名至少 3 个字符" },
+              { max: 50, message: "用户名最多 50 个字符" },
             ]}
           >
             <Input prefix={<UserOutlined />} placeholder="用户名" />
