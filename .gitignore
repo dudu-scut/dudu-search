@@ -24,6 +24,8 @@ frontend/.vite/
 venv/
 env/
 .env
+.env.backup
+.env.prod.local
 __pycache__/
 *.py[cod]
 *$py.class
@@ -73,3 +75,6 @@ docs/
 
 # Eval generated artifacts
 tests/eval/eval_report.json
+
+# Coverage
+.coverage
