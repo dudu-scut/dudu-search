@@ -1,0 +1,50 @@
+[
+  {
+    "id": "search-01",
+    "category": "网络搜索",
+    "query": "2025年诺贝尔物理学奖获得者是谁？",
+    "expected_tools": ["internet_search"],
+    "expected_keywords": ["诺贝尔", "物理学"],
+    "max_duration_s": 60
+  },
+  {
+    "id": "search-02",
+    "category": "网络搜索",
+    "query": "最近一周全球科技公司有什么重大新闻？",
+    "expected_tools": ["internet_search"],
+    "expected_keywords": ["科技", "公司"],
+    "max_duration_s": 60
+  },
+  {
+    "id": "db-01",
+    "category": "数据库查询",
+    "query": "查询订单表中最近的10条记录",
+    "expected_tools": ["execute_sql_query"],
+    "expected_keywords": ["SELECT"],
+    "max_duration_s": 30
+  },
+  {
+    "id": "db-02",
+    "category": "数据库查询",
+    "query": "统计每个分类的商品数量",
+    "expected_tools": ["execute_sql_query"],
+    "expected_keywords": ["COUNT", "GROUP BY"],
+    "max_duration_s": 30
+  },
+  {
+    "id": "markdown-01",
+    "category": "报告生成",
+    "query": "搜索一下最近AI领域的发展，帮我生成一份Markdown报告",
+    "expected_tools": ["internet_search", "generate_markdown"],
+    "expected_keywords": ["AI", "报告"],
+    "max_duration_s": 120
+  },
+  {
+    "id": "markdown-02",
+    "category": "报告生成",
+    "query": "把数据库中的商品信息整理成Markdown格式的报告",
+    "expected_tools": ["execute_sql_query", "generate_markdown"],
+    "expected_keywords": ["商品"],
+    "max_duration_s": 120
+  }
+]

@@ -70,3 +70,6 @@ examples/
 
 # Docs directory
 docs/
+
+# Eval generated artifacts
+tests/eval/eval_report.json
