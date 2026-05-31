@@ -55,15 +55,19 @@
 
 ## 技术栈
 
-| 类别    | 技术                                               |
-| ----- | ------------------------------------------------ |
-| 智能体框架 | DeepAgents 0.5.7 + LangChain 1.2 + LangGraph 1.1 |
-| 大语言模型 | DeepSeek (deepseek-chat)                         |
-| 后端框架  | FastAPI + Uvicorn                                |
-| 数据库   | PostgreSQL 16 + pgvector (向量数据库)                |
-| 缓存/消息队列 | Redis 7                                          |
-| 知识库   | ChromaDB + sentence-transformers                 |
-| 前端    | React + TypeScript + Vite                        |
+| 类别       | 技术                                                 |
+| ---------- | ---------------------------------------------------- |
+| 智能体框架 | DeepAgents 0.5.7 + LangChain 1.2 + LangGraph 1.1     |
+| 大语言模型 | DeepSeek (deepseek-chat)                             |
+| 后端框架   | FastAPI + Uvicorn                                    |
+| 数据库     | PostgreSQL 16 + pgvector (向量数据库)                |
+| 缓存/队列  | Redis 7 (缓存 + ARQ 任务队列)                        |
+| 知识库     | ChromaDB + sentence-transformers (BGE-small-zh-v1.5) |
+| 前端       | React + TypeScript + Vite + Ant Design               |
+| 认证       | JWT (Bearer Token) + bcrypt 密码哈希                 |
+| 日志       | structlog (JSON/console 双模式, trace_id 注入)       |
+| 指标       | Prometheus (Counter/Histogram/Gauge 全链路埋点)      |
+| 部署       | Docker + docker-compose + Nginx 反向代理             |
 
 ## 快速开始
 
@@ -336,44 +340,74 @@ pnpm dev
 ```
 deepsearch-agents/
 ├── app/
-│   ├── agent/                 # 智能体核心模块
-│   │   ├── main_agent.py      # 主智能体实现
-│   │   ├── llm.py            # LLM 配置
-│   │   └── subagents/        # 专家子智能体
+│   ├── agent/                  # 智能体核心模块
+│   │   ├── main_agent.py       # 主智能体实现
+│   │   ├── llm.py              # LLM 配置
+│   │   ├── prompts.py          # YAML 提示词加载
+│   │   └── subagents/          # 专家子智能体
 │   │       ├── network_search_agent.py
 │   │       ├── database_query_agent.py
 │   │       └── knowledge_base_agent.py
-│   ├── api/                   # Web API
-│   │   ├── server.py         # FastAPI 服务入口
-│   │   ├── monitor.py       # 实时事件监控
-│   │   └── context.py       # 会话上下文管理
-│   ├── storage/               # 存储持久化模块
-│   │   ├── __init__.py
-│   │   ├── db.py             # PostgreSQL 连接与 Schema
-│   │   ├── redis_client.py  # Redis 客户端
-│   │   └── memory_service.py # 记忆服务
-│   ├── tools/                # 工具函数
-│   │   ├── tavily_tool.py   # 网络搜索工具
-│   │   ├── db_tools.py      # 数据库工具
-│   │   ├── self_rag_tools.py # 知识库工具
-│   │   ├── markdown_tools.py # Markdown 生成
-│   │   └── pdf_tools.py     # PDF 转换
-│   ├── self_rag/             # 自建 RAG 系统
-│   │   ├── engine.py        # RAG 引擎
-│   │   └── config.py        # 配置管理
-│   └── prompt/               # 提示词配置
-│       └── prompts.yml       # 集中式提示词管理
-├── frontend/                  # React 前端
-│   └── src/
-│       ├── components/
-│       │   ├── SessionList.tsx
-│       │   └── MemoryPanel.tsx
-│       ├── types.ts
-│       └── lib/api.ts
-├── docker/                    # Docker 部署配置
-│   └── docker-compose.yaml   # PostgreSQL + Redis 配置
-└── examples/                  # 示例代码
-    └── skills/               # 技能扩展示例
+│   ├── api/                    # Web API
+│   │   ├── server.py           # FastAPI 入口 (REST + WebSocket)
+│   │   ├── monitor.py          # 实时事件监控 (WebSocket 推送)
+│   │   └── context.py          # ContextVar 会话上下文
+│   ├── auth/                   # 认证模块
+│   │   ├── jwt.py              # JWT 生成/验证 + 密码哈希
+│   │   └── dependencies.py     # FastAPI 认证依赖注入
+│   ├── storage/                # 存储持久化模块
+│   │   ├── db.py               # PostgreSQL 连接池 + Schema (4表)
+│   │   ├── redis_client.py     # Redis 客户端 + 事件缓存
+│   │   └── memory_service.py   # 记忆服务 (检索/存储/巩固)
+│   ├── tasks/                  # 定时任务
+│   │   └── cleanup.py          # 过期会话清理 (ARQ cron)
+│   ├── tools/                  # 工具函数
+│   │   ├── tavily_tool.py      # 网络搜索工具
+│   │   ├── db_tools.py         # 数据库查询工具 (SQL 安全校验)
+│   │   ├── self_rag_tools.py   # 知识库检索工具
+│   │   ├── markdown_tools.py   # Markdown 报告生成
+│   │   └── pdf_tools.py        # PDF 转换
+│   ├── self_rag/               # 自建 RAG 系统
+│   │   ├── engine.py           # RAG 引擎 (ChromaDB + BM25)
+│   │   └── config.py           # 检索/拆分参数配置
+│   ├── prompt/                 # 提示词配置
+│   │   └── prompts.yml         # 集中式提示词管理
+│   ├── config.py               # Pydantic 统一配置模块
+│   ├── exceptions.py           # 异常层次体系
+│   ├── logging_config.py       # structlog 结构化日志
+│   ├── metrics.py              # Prometheus 指标定义
+│   └── worker.py               # ARQ 异步任务 Worker
+├── tests/                      # 测试套件
+│   ├── conftest.py             # Pytest fixtures (Mock DB/Redis/App)
+│   ├── test_tools/             # 工具层测试 (34 tests)
+│   ├── test_api/               # API 层测试 (31 tests)
+│   ├── test_agent/             # Agent 集成测试 (19 tests)
+│   └── eval/                   # 评测基准 + 回归测试
+├── frontend/                   # React 前端
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ChatComposer.tsx   # 任务输入 + 取消按钮
+│   │   │   ├── EventStream.tsx    # 实时事件流 (可筛选)
+│   │   │   ├── SessionList.tsx    # 历史会话侧边栏
+│   │   │   ├── TaskHistory.tsx    # 历史任务表格
+│   │   │   ├── FilePreview.tsx    # 文件预览弹窗
+│   │   │   ├── LoginPage.tsx      # 登录/注册页
+│   │   │   └── MemoryPanel.tsx    # 记忆面板
+│   │   ├── hooks/
+│   │   │   └── useDeepAgentSession.ts  # 会话状态管理
+│   │   ├── lib/
+│   │   │   ├── api.ts            # API 函数
+│   │   │   └── auth.ts           # 前端认证工具
+│   │   └── types.ts
+│   ├── Dockerfile              # 前端 Docker 镜像
+│   └── nginx.conf              # Nginx SPA 配置
+├── docker/
+│   └── docker-compose.yaml     # 开发环境 PostgreSQL + Redis
+├── Dockerfile                  # 后端 Docker 镜像 (多阶段构建)
+├── docker-compose.prod.yaml    # 生产环境全栈编排
+├── .env.prod                   # 生产环境变量模板
+├── pyproject.toml
+└── CLAUDE.md                   # AI 助手指南
 ```
 
 ## 核心模块说明
@@ -451,6 +485,55 @@ sub_agents:
 - 只允许 SELECT/SHOW/DESCRIBE/EXPLAIN 查询语句
 - 表名使用正则白名单校验
 - 返回行数上限 1000 行
+
+## 生产级特性
+
+本项目已完成全链路生产优化（6 阶段 16 计划）：
+
+### 可观测性
+- **结构化日志**: structlog JSON/console 双模式，trace_id 全链路追踪，敏感字段自动脱敏
+- **Prometheus 指标**: 任务/工具调用/LLM 调用/SQL 查询/HTTP 请求全链路埋点，`/metrics` 端点
+- **健康检查**: `/live` (存活探针), `/ready` (就绪探针) 支持 Kubernetes
+
+### 可靠性
+- **异常体系**: 统一异常层次 (AppError → LLMError/DBError/AuthError/ValidationError)
+- **LLM 重试**: 连接错误/429 限流自动重试（最多 3 次），401 不重试
+- **任务队列**: ARQ Worker 异步执行，支持超时（300s）、重试（3 次）、定时清理
+
+### 安全性
+- **JWT 认证**: 注册/登录，Bearer Token，bcrypt 密码哈希
+- **用户组隔离**: 会话/知识库/数据库内容按 group_id 隔离
+- **SQL 注入防护**: 仅允许 SELECT/SHOW/DESCRIBE/EXPLAIN，危险关键字检测
+- **文件上传校验**: 扩展名白名单，拒绝可执行文件
+- **CORS 收紧**: 可配置来源白名单
+- **接口限流**: 用户并发限制 + 全局 QPS 滑动窗口 (Redis)
+
+### 会话持久化
+- PostgreSQL: sessions/messages/agent_events/long_term_memories 4 表
+- Redis 事件缓存: 断线重连回放最近 500 条事件
+- 任务取消: Redis 信号 + ARQ job abort + Worker 轮询三级机制
+- 过期清理: ARQ cron 每天凌晨 3 点清理过期会话
+
+## 测试
+
+```bash
+# 运行全部测试
+uv run pytest tests/ -v
+
+# 仅运行工具层测试
+uv run pytest tests/test_tools/ -v
+
+# 仅运行 API 测试
+uv run pytest tests/test_api/ -v
+
+# 带覆盖率报告
+uv run pytest tests/ -v --cov=app --cov-report=term-missing
+
+# 运行评测基准
+uv run python -m tests.eval.run_eval
+```
+
+全部 84 个测试用例，覆盖率 36%。
 
 ## 开发指南
 

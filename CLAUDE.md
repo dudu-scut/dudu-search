@@ -4,18 +4,25 @@
 
 基于 DeepAgents 框架的多智能体协作系统，主智能体负责理解用户任务、规划步骤、调度子智能体并汇总结果。三个专家子智能体分别负责网络搜索、数据库查询和知识库检索，互补完成信息获取。最终由主智能体生成 Markdown/PDF 交付文档。
 
+已完成全链路生产优化（6 阶段 16 计划）：配置管理、异常体系、JWT 认证、用户组隔离、安全加固、结构化日志、ARQ 任务队列、限流、Prometheus 指标、会话持久化、测试套件、前端增强、容器化部署。
+
 ## 技术栈
 
-- **框架**: DeepAgents 0.5.7 + LangChain 1.2 + LangGraph 1.1
-- **LLM**: DeepSeek (`deepseek-chat`) 通过 OpenAI 兼容 API，配置在 `app/agent/llm.py`
-- **Web**: FastAPI + WebSocket，`app/api/server.py`
-- **包管理**: uv（`pyproject.toml` + `uv.lock`），Python >=3.12,<3.13
-- **自建 RAG**: ChromaDB（嵌入式持久化）+ sentence-transformers（`BAAI/bge-small-zh-v1.5`）+ jieba 分词 + BM25 稀疏检索，位于 `app/self_rag/`
-- **数据库**: PostgreSQL 16 + pgvector（向量数据库），通过 `asyncpg` 直连
-- **缓存**: Redis 7，用于活跃任务注册和热状态存储
-- **记忆系统**: 基于 pgvector 的语义记忆检索，支持会话持久化和跨会话记忆复用
-- **网络搜索**: Tavily API
-- **文档生成**: Markdown 直写 + Markdown→PDF（reportlab）
+| 类别 | 技术 |
+|------|------|
+| 智能体框架 | DeepAgents 0.5.7 + LangChain 1.2 + LangGraph 1.1 |
+| LLM | DeepSeek (deepseek-chat)，OpenAI 兼容 API (`app/agent/llm.py`) |
+| Web | FastAPI + WebSocket (`app/api/server.py`) |
+| 包管理 | uv (`pyproject.toml` + `uv.lock`)，Python >=3.12,<3.13 |
+| 数据库 | PostgreSQL 16 + pgvector (asyncpg 直连) |
+| 缓存/队列 | Redis 7 (缓存 + ARQ 任务队列) |
+| RAG | ChromaDB + sentence-transformers (BAAI/bge-small-zh-v1.5) + jieba BM25 |
+| 认证 | JWT (Bearer Token, PyJWT) + bcrypt 密码哈希 |
+| 日志 | structlog (JSON/console 双模式, trace_id 注入, 敏感字段脱敏) |
+| 指标 | prometheus-client (Counter/Histogram/Gauge 全链路埋点) |
+| 前端 | React + TypeScript + Vite + Ant Design |
+| 部署 | Docker 多阶段构建 + docker-compose + Nginx 反向代理 |
+| 测试 | pytest + pytest-asyncio + pytest-cov + httpx |
 
 ## 项目结构
 
@@ -23,168 +30,170 @@
 deepsearch-agents/
 ├── app/
 │   ├── agent/
-│   │   ├── main_agent.py          # 主智能体组装 + run_deep_agent() 异步入口
-│   │   ├── llm.py                 # LLM 初始化（DeepSeek + OpenAI 兼容协议）
-│   │   ├── prompts.py              # YAML 提示词加载
+│   │   ├── main_agent.py          # 主智能体: create_deep_agent() + run_deep_agent()
+│   │   ├── llm.py                 # LLM 初始化 (get_llm)
+│   │   ├── prompts.py             # YAML 提示词加载 (load_yaml)
 │   │   └── subagents/
-│   │       ├── network_search_agent.py   # Tavily 网络搜索子智能体
-│   │       ├── database_query_agent.py   # MySQL 数据库查询子智能体
-│   │       └── knowledge_base_agent.py   # 自建 RAG 知识库子智能体
-│   ├── prompt/
-│   │   └── prompts.yml            # 主智能体 + 子智能体提示词集中配置
+│   │       ├── network_search_agent.py
+│   │       ├── database_query_agent.py
+│   │       └── knowledge_base_agent.py
 │   ├── api/
-│   │   ├── server.py              # FastAPI 入口（REST + WebSocket + KB管理API）
-│   │   ├── monitor.py             # ToolMonitor：工具调用→WebSocket 事件推送
-│   │   └── context.py             # ContextVar：协程级 session_dir/thread_id
-│   ├── storage/                    # 存储持久化模块
-│   │   ├── db.py                 # PostgreSQL 连接池 + Schema（4表）
-│   │   ├── redis_client.py       # Redis 客户端 + 热状态操作
-│   │   └── memory_service.py     # 记忆服务：检索/存储/巩固 Pipeline
+│   │   ├── server.py              # FastAPI 入口: REST + WebSocket + 中间件栈
+│   │   ├── monitor.py             # ToolMonitor: 工具调用→WebSocket 推送 + Redis 缓存
+│   │   └── context.py             # ContextVar: trace_id/user_id/group_id/session_dir/thread_id
+│   ├── auth/
+│   │   ├── jwt.py                 # JWT 生成/验证 (create_access_token, hash_password, verify_password)
+│   │   └── dependencies.py        # FastAPI 依赖: get_current_user, require_admin
+│   ├── storage/
+│   │   ├── db.py                  # asyncpg 连接池 + Schema: sessions/messages/agent_events/long_term_memories
+│   │   ├── redis_client.py        # Redis 客户端: 缓存/事件/限流/取消信号
+│   │   └── memory_service.py      # 记忆服务: 语义检索/上下文构建/会话巩固
+│   ├── tasks/
+│   │   └── cleanup.py             # ARQ cron: 过期会话清理 (每天凌晨 3 点)
 │   ├── tools/
-│   │   ├── tavily_tool.py         # internet_search 工具
-│   │   ├── db_tools.py            # list_sql_tables / get_table_data / execute_sql_query
-│   │   ├── self_rag_tools.py      # list_knowledge_bases / query_knowledge_base
-│   │   ├── markdown_tools.py      # generate_markdown 工具
-│   │   ├── pdf_tools.py           # convert_md_to_pdf 工具
+│   │   ├── tavily_tool.py         # internet_search (Tavily API)
+│   │   ├── db_tools.py            # list_sql_tables/get_table_data/execute_sql_query (SQL 安全校验)
+│   │   ├── self_rag_tools.py      # list_knowledge_bases/query_knowledge_base (ChromaDB RAG)
+│   │   ├── markdown_tools.py      # generate_markdown (文件输出)
+│   │   ├── pdf_tools.py           # convert_md_to_pdf (reportlab)
 │   │   └── upload_file_read_tool.py
 │   ├── self_rag/
-│   │   ├── engine.py              # RAGEngine：ChromaDB + embedding + BM25 + LLM QA
-│   │   └── config.py              # 自建 RAG 配置（拆分、检索、BM25 参数等）
-│   └── utils/
-│       ├── path_utils.py          # resolve_path：虚拟路径→本地会话目录
-│       └── word_converter.py      # Markdown→PDF 底层转换（reportlab）
-├── frontend/                      # 前端（Vite）
-├── docker/                        # PostgreSQL + Redis Docker 部署
+│   │   ├── engine.py              # RAGEngine 单例: ChromaDB + embedding + BM25 + LLM QA
+│   │   └── config.py              # RAG 配置: 拆分/检索/BM25/RRF 参数
+│   ├── prompt/
+│   │   └── prompts.yml            # 主智能体 + 子智能体提示词集中配置
+│   ├── config.py                  # Pydantic BaseSettings 统一配置 (所有环境变量)
+│   ├── exceptions.py              # 异常层次: AppError → LLMError/DBError/AuthError/ValidationError
+│   ├── logging_config.py          # structlog 配置: setup_logging/get_logger + 脱敏处理器
+│   ├── metrics.py                 # Prometheus: TASK/TOOL/LLM/SQL/HTTP 指标 + ACTIVE_TASKS
+│   └── worker.py                  # ARQ Worker: run_agent_task + WorkerSettings (cron/concurrency)
+├── tests/
+│   ├── conftest.py                # Fixtures: mock DB pool, mock Redis, test FastAPI app, auth headers
+│   ├── test_tools/                # 工具层测试 (34 tests)
+│   │   ├── test_db_tools.py       # SQL 安全校验 (20 tests)
+│   │   ├── test_tavily_tool.py    # 搜索工具 (7 tests)
+│   │   └── test_markdown_tools.py # Markdown 工具 (7 tests)
+│   ├── test_api/                  # API 层测试 (31 tests)
+│   │   ├── test_auth.py           # 认证: 注册/登录/me (13 tests)
+│   │   ├── test_sessions.py       # 会话 CRUD (7 tests)
+│   │   ├── test_kb.py             # 知识库隔离 (4 tests)
+│   │   ├── test_upload.py         # 文件上传安全 (5 tests)
+│   │   └── test_ws.py             # WebSocket 连接 (2 tests)
+│   ├── test_agent/                # Agent 集成测试 (19 tests)
+│   │   └── test_main_agent.py     # 重试逻辑 + Agent 构建
+│   └── eval/                      # 评测基准
+│       ├── benchmark.json         # 6 条评测用例 (搜索/数据库/报告)
+│       ├── metrics.py             # EvalResult/EvalReport + compare_reports
+│       └── run_eval.py            # CLI 评测执行器
+├── frontend/
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ChatComposer.tsx   # 输入框 + 发送/取消按钮 (isRunning 切换图标)
+│   │   │   ├── EventStream.tsx    # 实时事件流 + 类型筛选 (Tag.CheckableTag)
+│   │   │   ├── SessionList.tsx    # 历史会话列表 (30s 轮询)
+│   │   │   ├── TaskHistory.tsx    # 历史任务表格 (搜索/筛选/30s 轮询)
+│   │   │   ├── FilePreview.tsx    # 文件预览弹窗 (图片/Markdown/PDF)
+│   │   │   ├── LoginPage.tsx      # 登录/注册 (表单验证, token 存储)
+│   │   │   └── MemoryPanel.tsx
+│   │   ├── hooks/
+│   │   │   └── useDeepAgentSession.ts  # WebSocket + 状态管理 (15s/30s 轮询)
+│   │   ├── lib/
+│   │   │   ├── api.ts             # REST API 函数 (startTask/cancelTask/listSessions/...)
+│   │   │   └── auth.ts            # 前端认证 (getUser/logout/authFetch)
+│   │   └── types.ts
+│   ├── Dockerfile                 # 前端多阶段构建 (pnpm build + nginx)
+│   └── nginx.conf                 # SPA 配置: API 代理/WebSocket/Gzip/缓存
+├── docker/
+│   └── docker-compose.yaml        # 开发环境 (PostgreSQL + Redis)
+├── Dockerfile                     # 后端多阶段构建 (uv sync + python:3.12-slim)
+├── docker-compose.prod.yaml       # 生产环境全栈: postgres/redis/app/worker(x2)/frontend
+├── nginx.conf                     # 生产 Nginx: /api /ws /live /ready /metrics 代理
+├── .env.prod                      # 生产环境变量模板
 ├── pyproject.toml
-└── .env                           # 环境变量（不提交）
+└── CLAUDE.md
 ```
 
 ## 架构要点
 
-### 智能体协作流
+### 中间件栈 (server.py lifespan)
 
 ```
-用户任务 → main_agent (create_deep_agent)
-  ├─ 信息获取阶段: 并行/串行调用三个子智能体
-  │   ├─ 网络搜索助手 (tavily) → internet_search
-  │   ├─ 数据库查询助手 (db) → list_sql_tables → get_table_data → execute_sql_query
-  │   └─ 知识库助手 (rag) → list_knowledge_bases → query_knowledge_base
-  └─ 文件生成阶段: 主智能体直接调用
-      ├─ generate_markdown
-      └─ convert_md_to_pdf
+请求 → CORS → QPS 限流 (Redis 滑动窗口) → HTTP 指标 → trace_id → Auth (JWT) → 路由处理
 ```
 
-### 关键设计决策
-
-- **子智能体只获取信息，不生成文件**：文件生成工具只挂载在主智能体上，子智能体拿到原始数据后返回给主智能体汇总，再由主智能体调用 `generate_markdown` / `convert_md_to_pdf`
-- **会话隔离**：每次任务创建 `output/session_{thread_id}/` 工作目录，上传文件先存到 `updated/session_{thread_id}/` 再复制到工作目录
-- **ContextVar 传递上下文**：`session_dir` 和 `thread_id` 通过 `contextvars.ContextVar` 在协程链路中隐式传递，工具层无需显式传参
-- **monitor 埋点**：所有工具调用和子智能体调用都通过 `monitor.report_tool()` / `monitor.report_assistant()` 上报，由 `ToolMonitor._emit()` 通过 WebSocket 推送给前端，同时保留控制台输出作为保底
-
-### 存储持久化与记忆系统
-
-#### 架构概览
+### 任务生命周期
 
 ```
-用户请求 → FastAPI
-    ├─ Redis: 活跃任务注册 (替代内存 dict)
-    ├─ PostgreSQL:
-    │   ├─ sessions 表: 会话元数据
-    │   ├─ messages 表: 对话历史
-    │   ├─ agent_events 表: 执行轨迹
-    │   └─ long_term_memories 表: 长期记忆 (pgvector)
-    ├─ PostgresSaver: LangGraph 检查点持久化 (替代 InMemorySaver)
-    └─ MemoryService:
-        ├─ 检索: 语义检索 (pgvector cosine) + 会话摘要
-        ├─ 注入: 新对话时自动注入相关记忆上下文
-        └─ 巩固: 会话结束 → LLM 摘要 + 事实提取 → 长期记忆
+POST /api/task → ARQ enqueue (Redis) → Worker: run_agent_task()
+  ├─ Redis: 设置 cancel:{thread_id} 标志 + task_job:{thread_id} 映射
+  ├─ DB: status queued→running→completed/failed/cancelled
+  └─ Prometheus: TASK_TOTAL{status} + ACTIVE_TASKS + TASK_DURATION
+
+POST /api/task/{thread_id}/cancel
+  ├─ Redis: SET cancel:{thread_id}=1
+  ├─ ARQ: job.abort() (队列中未执行)
+  └─ Worker: 每 0.5s 轮询 cancel:{thread_id}，asyncio.wait FIRST_COMPLETED 模式
 ```
 
-#### 数据库 Schema
+### 取消机制 (三级)
 
-`app/storage/db.py` 初始化 4 张表：
-- **sessions**: 会话元数据（thread_id, title, summary, status, metadata）
-- **messages**: 对话消息（thread_id, role, content, tool_calls, token_count）
-- **agent_events**: Agent 执行轨迹（thread_id, event_type, message, payload）
-- **long_term_memories**: 长期记忆（memory_type, content, embedding vector(512), importance）
+1. **Redis 取消信号**: `cancel:{thread_id}` key，API 写入，Worker 轮询 (0.5s)
+2. **ARQ job.abort()**: 任务还在队列时直接中止
+3. **Worker 竞速**: `asyncio.wait([agent_task, cancel_event.wait()], FIRST_COMPLETED)` → 取消信号先到则 cancel agent_task
 
-#### MemoryService 核心功能
+### 数据库 Schema
 
-`app/storage/memory_service.py` 提供：
+`app/storage/db.py` 初始化 4 表 + FK 约束:
+- **sessions**: thread_id (PK), user_id, group_id, title, status (queued/running/completed/failed/cancelled), metadata
+- **messages**: thread_id (FK→sessions CASCADE), role, content, tool_calls, token_count
+- **agent_events**: thread_id (FK→sessions CASCADE), event_type, message, payload
+- **long_term_memories**: memory_type (fact/preference/episodic/semantic), content, embedding vector(512), importance
 
-1. **语义检索** (`retrieve_relevant`): 使用 pgvector 的余弦相似度进行向量检索
-2. **会话摘要检索** (`retrieve_recent_summaries`): 获取最近会话摘要
-3. **上下文构建** (`build_context`): 为新对话构建记忆上下文块
-4. **记忆存储** (`store_memory`): 存储带向量嵌入的长期记忆
-5. **会话巩固** (`consolidate_session`): 会话结束后调用 LLM 提取摘要和事实
+### 配置模块 (app/config.py)
 
-#### 记忆类型
+Pydantic `BaseSettings`，自动从 `.env` 读取，所有配置集中管理:
 
-支持 4 种记忆类型：
-- **fact**: 事实
-- **preference**: 偏好
-- **episodic**: 经历
-- **semantic**: 知识
+```python
+class Settings(BaseSettings):
+    # LLM
+    LLM_API_KEY: str
+    LLM_BASE_URL: str = "https://api.deepseek.com/v1"
+    LLM_MODEL: str = "deepseek-chat"
+    # Database
+    POSTGRES_HOST/PORT/USER/PASSWORD/DB
+    DB_POOL_MIN_SIZE/MAX_SIZE/COMMAND_TIMEOUT
+    # Redis
+    REDIS_HOST/PORT/PASSWORD/DB
+    # Auth
+    JWT_SECRET: str
+    JWT_ALGORITHM: str = "HS256"
+    JWT_EXPIRE_MINUTES: int = 1440
+    # Limits
+    USER_MAX_CONCURRENT_TASKS: int = 3
+    GLOBAL_QPS_LIMIT: int = 50
+    TASK_TIMEOUT_SECONDS: int = 300
+    SESSION_RETENTION_DAYS: int = 30
+    # Logging
+    LOG_FORMAT: Literal["console", "json"] = "console"
+    # ... more settings
+```
 
-#### 新增 API 端点
+### 指标模块 (app/metrics.py)
 
-| 方法 | 端点 | 说明 |
-|------|------|------|
-| GET | `/api/sessions` | 历史会话列表（分页、按时间倒序） |
-| GET | `/api/sessions/{thread_id}` | 会话详情（消息 + 事件） |
-| DELETE | `/api/sessions/{thread_id}` | 删除会话（级联删除消息/事件） |
-| GET | `/api/memories` | 长期记忆列表（按类型筛选） |
-| POST | `/api/memories` | 手动创建记忆 |
-| DELETE | `/api/memories/{memory_id}` | 删除记忆 |
+```python
+TASK_TOTAL = Counter("task_total", "...", ["status"])        # started/completed/failed/cancelled
+TASK_DURATION = Histogram("task_duration_seconds", "...")
+TOOL_CALL_TOTAL = Counter("tool_call_total", "...", ["tool_name"])
+TOOL_CALL_DURATION = Histogram("tool_call_duration_seconds", "...", ["tool_name"])
+LLM_CALL_TOTAL/DURATION, SQL_QUERY_TOTAL/DURATION, HTTP_REQUEST_TOTAL/DURATION
+ACTIVE_TASKS = Gauge("active_tasks", "...")
+```
 
-#### 主智能体集成
-
-`app/agent/main_agent.py` 中的 `run_deep_agent()`:
-- 会话开始：调用 `memory_service.build_context()` 注入记忆上下文
-- 会话执行：使用 `PostgresSaver` 持久化 LangGraph 检查点
-- 会话结束：异步触发 `_run_memory_consolidation()` 巩固记忆
+端点: `GET /metrics` (admin 认证保护)
 
 ### 自建 RAG 链路
 
-#### 文档拆分（父子文档策略）
-
-```
-文件 → _parse_file(PDF/DOCX/MD/TXT) → 全文
-  → parent_splitter(1000字, RecursiveCharacterTextSplitter)
-     分隔符优先级: \n\n(段落) → \n(换行) → 。.(句子) → ；;(短句) → ，,(逗号) → 字符
-  → 父块[] → child_splitter(200字) → 子块[]
-  → 子块 embed(bge-small-zh-v1.5) → ChromaDB 主 collection（参与检索）
-  → 父块直接存储 → ChromaDB _parents collection（仅做上下文回填）
-```
-
-#### 检索（双路融合）
-
-```
-用户问题
-  ├─→ embed → ChromaDB.query(top_k=4)      → dense_ranks  {parent_id: rank}
-  ├─→ jieba → BM25.search(top_k=10)        → bm25_ranks   {parent_id: rank}
-  └─→ RRF 融合 (k=60) → top 4 parent_ids
-      → ChromaDB._parents.get(ids) → 父块文本
-      → _generate_answer(DeepSeek LLM) → 答案
-```
-
-关键设计：
-- **子块检索、父块作答**：200字子块匹配更精准，1000字父块提供完整段落上下文
-- **稠密 + 稀疏互补**：向量相似度捕获语义相关，BM25 捕获精确关键词命中
-- **RRF 去重融合**：按 parent_id 聚合两路排名，避免同一父块的多个子块同时命中造成偏置
-- **BM25 懒加载缓存**：首次查询时从 ChromaDB 子块重建 BM25 索引并缓存在内存，摄入/删除时失效
-
-#### 存储结构
-
-每个知识库对应两个 ChromaDB collection：
-- `{kb_name}` — 子块（有 embedding，参与稠密检索）
-- `{kb_name}_parents` — 父块（无 embedding，仅做 ID 查找回填）
-
-RAGEngine 是单例（`get_rag_engine()`），首次访问时加载 embedding 模型（~100MB）和 ChromaDB 客户端。
-
-### 数据库查询安全
-
-`db_tools.py` 中 `execute_sql_query` 只允许 `SELECT/SHOW/DESCRIBE/EXPLAIN` 开头语句，`get_table_data` 对表名做 `\w+` 正则白名单校验，返回行数上限 1000。
+父子文档策略: 200 字子块检索 + 1000 字父块作答，双路融合 (dense + BM25 → RRF k=60 → top 4)
 
 ## 常用命令
 
@@ -192,62 +201,76 @@ RAGEngine 是单例（`get_rag_engine()`），首次访问时加载 embedding �
 # 安装依赖
 uv sync
 
-# 启动数据库服务 (PostgreSQL + Redis)
-cd docker
-docker compose up -d postgres redis
+# 启动数据库 (开发环境)
+cd docker && docker compose up -d postgres redis
 
-# 验证 PostgreSQL 连接
-docker compose exec postgres psql -U deepagents -d deepagents -c "SELECT 1;"
-
-# 验证 Redis 连接
-docker compose exec redis redis-cli -a deepagents ping
-
-# 启动后端 (端口 8000)
-cd ..
+# 启动后端 API (端口 8000)
 uv run python -m app.api.server
 
-# 运行主智能体（脚本调试模式）
-uv run python -m app.agent.main_agent
+# 启动 ARQ Worker (异步任务执行)
+uv run arq app.worker.WorkerSettings
 
-# 单独测试工具
-uv run python -m app.tools.db_tools
-uv run python -m app.tools.markdown_tools
-uv run python -m app.tools.pdf_tools
-uv run python -m app.tools.tavily_tool
+# 启动前端 (开发模式, 端口 5173)
+cd frontend && pnpm dev
+
+# 运行全部测试
+uv run pytest tests/ -v
+
+# 运行特定测试 + 覆盖率
+uv run pytest tests/test_tools/ -v --cov=app.tools --cov-report=term-missing
+
+# 运行评测基准
+uv run python -m tests.eval.run_eval
+
+# 前端构建检查
+cd frontend && pnpm build
+
+# 生产部署
+docker compose -f docker-compose.prod.yaml up -d
 ```
 
 ## 环境变量
 
-复制 `.env.example` 为 `.env`，关键变量：
+复制 `.env.example` 为 `.env`，关键变量:
 
-| 变量 | 说明 |
-|------|------|
-| `OPENAI_BASE_URL` | LLM API 地址（默认 DeepSeek） |
-| `OPENAI_API_KEY` | LLM API 密钥 |
-| `LLM_DEEPSEEK_MODEL` | 模型名（默认 `deepseek-chat`） |
-| `TAVILY_API_KEY` | Tavily 搜索 API 密钥 |
-| `POSTGRES_HOST/PORT/USER/PASSWORD/DB` | PostgreSQL 连接配置 |
-| `POSTGRES_URI` | PostgreSQL 连接 URI（可选，优先级高于单个变量） |
-| `REDIS_HOST/PORT/PASSWORD` | Redis 连接配置 |
-| `MEMORY_EMBEDDING_DIM` | 记忆向量维度（默认 512） |
-| `EMBEDDING_MODEL` | 嵌入模型（默认 `BAAI/bge-small-zh-v1.5`），已替代 `SELF_RAG_EMBEDDING_MODEL` |
-| `SELF_RAG_TOP_K` | 稠密检索返回片段数（默认 4） |
-| `SELF_RAG_PARENT_CHUNK_SIZE` | 父块大小，字符数（默认 1000） |
-| `SELF_RAG_CHILD_CHUNK_SIZE` | 子块大小，字符数（默认 200） |
-| `SELF_RAG_CHUNK_OVERLAP` | 相邻块重叠字符数（默认 50） |
-| `SELF_RAG_BM25_ENABLED` | 是否启用 BM25 混合检索（默认 true） |
-| `SELF_RAG_BM25_TOP_K` | BM25 路召回数（默认 10） |
-| `SELF_RAG_RRF_K` | RRF 融合平滑参数（默认 60） |
-| `SELF_RAG_HYBRID_TOP_K` | 融合后最终返回父块数（默认 4） |
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `LLM_API_KEY` | LLM API 密钥 (必填) | - |
+| `LLM_BASE_URL` | LLM API 地址 | `https://api.deepseek.com/v1` |
+| `LLM_MODEL` | 模型名称 | `deepseek-chat` |
+| `TAVILY_API_KEY` | Tavily 搜索 API 密钥 (建议) | - |
+| `POSTGRES_HOST/PORT/USER/PASSWORD/DB` | PostgreSQL 连接 | localhost/5432/deepagents/deepagents/deepagents |
+| `POSTGRES_URI` | PostgreSQL 连接 URI (优先级高于单个变量) | - |
+| `DB_POOL_MIN_SIZE/MAX_SIZE` | 连接池配置 | 2/10 |
+| `DB_COMMAND_TIMEOUT` | SQL 命令超时 (秒) | 30 |
+| `REDIS_HOST/PORT/PASSWORD/DB` | Redis 连接 | localhost/6379/deepagents/0 |
+| `JWT_SECRET` | JWT 签名密钥 (生产务必修改) | - |
+| `JWT_ALGORITHM` | JWT 算法 | HS256 |
+| `JWT_EXPIRE_MINUTES` | Token 过期时间 (分钟) | 1440 |
+| `USER_MAX_CONCURRENT_TASKS` | 每用户最大并发任务 | 3 |
+| `GLOBAL_QPS_LIMIT` | 全局每秒请求上限 | 50 |
+| `TASK_TIMEOUT_SECONDS` | 单任务超时 (秒) | 300 |
+| `SESSION_RETENTION_DAYS` | 会话保留天数 | 30 |
+| `LOG_FORMAT` | 日志格式: console/json | console |
+| `CORS_ORIGINS` | 允许跨域来源 (逗号分隔) | `*` (开发) |
+| `NGINX_PORT` | 生产部署对外端口 | 80 |
+| `EMBEDDING_MODEL` | 嵌入模型 | `BAAI/bge-small-zh-v1.5` |
+| `SELF_RAG_TOP_K` | 稠密检索返回数 | 4 |
+| `SELF_RAG_BM25_ENABLED` | 启用 BM25 | true |
 
-## 提示词管理
+## 关键设计决策
 
-所有智能体提示词集中在 `app/prompt/prompts.yml`，通过 `app/agent/prompts.py` 的 `load_yaml()` 加载。修改智能体行为只需编辑 YAML，无需改动 Python 代码。子智能体的 `description` 字段决定主智能体的路由判断，`system_prompt` 约束子智能体的执行方式。
+- **子智能体只获取信息，不生成文件**: 文件生成工具只挂载主智能体
+- **ContextVar 传递上下文**: trace_id/user_id/group_id/session_dir/thread_id 通过 ContextVar 隐式传递
+- **monitor 多通道推送**: `_emit()` → WebSocket + Redis 缓存 + 控制台
+- **mock 优先测试**: 所有外部依赖通过 Mock 隔离，不连真实服务
+- **`.env` 不入库**: API 密钥等敏感信息通过 Pydantic BaseSettings 从环境变量读取
 
 ## 注意事项
 
-- 项目使用 `uv` 管理依赖，不要用 `pip install`，用 `uv sync` 或 `uv add`
+- 使用 `uv` 管理依赖，不要用 `pip install`，用 `uv sync` 或 `uv add`
+- 安装 ARQ 后 redis 会被降级到 5.3.1 (ARQ 要求 redis<6.0)，不影响功能
 - `.env` 中的 API 密钥不要提交到 git
-- 旧 RAGFlow 代码保留在 `app/ragflow/` 和 `app/tools/ragflow_tools.py`，但已不被活跃代码引用，仅作参考
-- Windows 环境下路径统一使用 `/` 分隔符（代码中有 `replace("\\", "/")` 处理）
+- Windows 环境下路径统一使用 `/` 分隔符
 - 前端 `frontend/node_modules` 体积较大，搜索时注意排除
+- 旧 RAGFlow 代码保留在 `app/ragflow/` 但已不被引用，仅作参考
