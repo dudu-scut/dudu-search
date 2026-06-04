@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import { cancelTask, getSessionDetail, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -34,6 +34,10 @@ export function useDeepAgentSession() {
   const [isCancelling, setIsCancelling] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadedItems, setUploadedItems] = useState<UploadedItem[]>([]);
+  const [isViewingHistory, setIsViewingHistory] = useState(false);
+  const [viewingSessionId, setViewingSessionId] = useState<string | null>(null);
+  const [viewingSessionTitle, setViewingSessionTitle] = useState("");
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   const clearSocketTimers = useCallback(() => {
     if (reconnectTimerRef.current) {
@@ -102,12 +106,13 @@ export function useDeepAgentSession() {
         if (socketRef.current !== socket) {
           return;
         }
+        // 服务端心跳回复是纯文本 "pong"，先处理再解析 JSON
+        if (event.data === "pong") {
+          setLastPongAt(new Date().toISOString());
+          return;
+        }
         try {
           const payload = JSON.parse(event.data) as SocketMessage;
-          if (payload.type === "pong") {
-            setLastPongAt(new Date().toISOString());
-            return;
-          }
 
           if (payload.type !== "monitor_event") {
             return;
@@ -137,6 +142,7 @@ export function useDeepAgentSession() {
 
           if (payload.event === "error") {
             setLastError(payload.message);
+            setResult((previous) => previous || `❌ ${payload.message}`);
             setIsRunning(false);
             setIsCancelling(false);
           }
@@ -283,6 +289,66 @@ export function useDeepAgentSession() {
     [threadId]
   );
 
+  const loadHistoricalSession = useCallback(
+    async (threadId: string) => {
+      setIsLoadingHistory(true);
+      setLastError("");
+      try {
+        const detail = await getSessionDetail(threadId);
+
+        // 将数据库中的 agent_events 转换为前端 MonitorMessage 格式
+        const historyEvents: MonitorMessage[] = (detail.events || []).map((evt) => ({
+          type: "monitor_event" as const,
+          event: evt.event_type,
+          message: evt.message,
+          data: (evt.payload || {}) as Record<string, unknown>,
+          timestamp: evt.created_at,
+        }));
+
+        // 将 threadId 切换为历史会话 ID，触发 WebSocket 重连到历史会话
+        // submitTask 使用 threadId，因此后续提交会自动发到正确的会话
+        storeThreadId(threadId);
+        setThreadId(threadId);
+        setEvents(historyEvents);
+        setViewingSessionId(threadId);
+        setViewingSessionTitle(detail.title || threadId.slice(0, 8));
+        setIsViewingHistory(true);
+        setIsRunning(detail.status === "running");
+        setFiles([]);
+        setSessionPath("");
+        setResult("");
+
+        return { detail, historyEvents };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : "加载历史会话失败";
+        setLastError(msg);
+        throw error;
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    },
+    []
+  );
+
+  // 软切换：清除历史查看标记但保留 threadId 和 events
+  // 用于用户在历史会话中提交新任务时的模式过渡
+  const clearHistoryView = useCallback(() => {
+    setIsViewingHistory(false);
+    setViewingSessionId(null);
+    setViewingSessionTitle("");
+    setIsLoadingHistory(false);
+    // threadId 和 events 保持不变 — submitTask 即将使用当前 threadId
+  }, []);
+
+  const exitHistoryView = useCallback(() => {
+    setIsViewingHistory(false);
+    setViewingSessionId(null);
+    setViewingSessionTitle("");
+    setIsLoadingHistory(false);
+    // 退出历史查看时重置为新的 live session
+    resetSession();
+  }, [resetSession]);
+
   const stats = useMemo(() => {
     const toolEvents = events.filter((event) => event.event === "tool_start").length;
     const assistantEvents = events.filter((event) => event.event === "assistant_call").length;
@@ -301,19 +367,26 @@ export function useDeepAgentSession() {
     events,
     files,
     isCancelling,
+    isLoadingHistory,
     isRunning,
     isUploading,
+    isViewingHistory,
     lastError,
     lastPongAt,
+    loadHistoricalSession,
     refreshFiles,
     resetSession,
     result,
     sessionPath,
     stats,
     cancelCurrentTask,
+    clearHistoryView,
+    exitHistoryView,
     submitTask,
     threadId,
     uploadFiles,
-    uploadedItems
+    uploadedItems,
+    viewingSessionId,
+    viewingSessionTitle
   };
 }
