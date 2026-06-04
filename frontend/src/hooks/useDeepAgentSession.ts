@@ -293,6 +293,7 @@ export function useDeepAgentSession() {
     async (threadId: string) => {
       setIsLoadingHistory(true);
       setLastError("");
+      setIsCancelling(false);
       try {
         const detail = await getSessionDetail(threadId);
 
