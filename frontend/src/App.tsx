@@ -47,9 +47,8 @@ function createTurn(content: string): ChatTurn {
   };
 }
 
-export default function App() {
+function AuthenticatedApp() {
   const { message } = AntApp.useApp();
-  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
   const [query, setQuery] = useState("");
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
@@ -57,11 +56,8 @@ export default function App() {
   const streamRef = useRef<HTMLElement | null>(null);
   const session = useDeepAgentSession();
 
-  if (!loggedIn) {
-    return <LoginPage onLoginSuccess={() => setLoggedIn(true)} />;
-  }
-
   useEffect(() => {
+    if (session.isViewingHistory) return;
     setTurns((previous) => {
       if (previous.length === 0) {
         return previous;
@@ -78,7 +74,7 @@ export default function App() {
 
       return [...previous.slice(0, -1), nextLatestTurn];
     });
-  }, [session.events, session.files, session.isRunning, session.result]);
+  }, [session.events, session.files, session.isRunning, session.result, session.isViewingHistory]);
 
   useEffect(() => {
     const streamNode = streamRef.current;
@@ -105,6 +101,12 @@ export default function App() {
     if (!cleanQuery) {
       message.warning("请输入研搜任务");
       return;
+    }
+
+    // 在历史会话中提交新任务时，清除查看标记但不重置 threadId，
+    // 确保 useEffect 能正常同步事件到最新 turn，且任务提交到正确的历史会话
+    if (session.isViewingHistory) {
+      session.clearHistoryView();
     }
 
     const nextTurn = createTurn(cleanQuery);
@@ -150,10 +152,59 @@ export default function App() {
   }
 
   function handleNewSession() {
-    session.resetSession();
+    if (session.isViewingHistory) {
+      session.exitHistoryView();
+    } else {
+      session.resetSession();
+    }
     setTurns([]);
     setQuery("");
     setStagedItems([]);
+  }
+
+  async function handleSelectSession(threadId: string) {
+    if (session.isViewingHistory && session.viewingSessionId === threadId) {
+      return; // Already viewing this session
+    }
+
+    try {
+      const { detail, historyEvents } = await session.loadHistoricalSession(threadId);
+
+      // 从历史消息重建 ChatTurn（使用返回值中的 historyEvents 避免 React setState 异步导致的值滞后）
+      const userMessages = (detail.messages || []).filter((m) => m.role === "user");
+      const assistantMessages = (detail.messages || []).filter((m) => m.role === "assistant");
+
+      if (userMessages.length > 0) {
+        const turns: ChatTurn[] = userMessages.map((userMsg, index) => {
+          const assistantMsg = assistantMessages[index];
+          return {
+            id: `${threadId}-${index}`,
+            content: userMsg.content || "",
+            events: index === userMessages.length - 1 ? historyEvents : [],
+            files: [],
+            isRunning: detail.status === "running",
+            result: assistantMsg?.content || "",
+            timestamp: userMsg.created_at,
+          };
+        });
+        setTurns(turns);
+      } else {
+        // 兼容旧数据：无用户消息时仍然显示 events
+        setTurns([
+          {
+            id: threadId,
+            content: detail.title || "(无标题)",
+            events: historyEvents,
+            files: [],
+            isRunning: detail.status === "running",
+            result: assistantMessages[assistantMessages.length - 1]?.content || "",
+            timestamp: detail.started_at || new Date().toISOString(),
+          },
+        ]);
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "加载历史会话失败");
+    }
   }
 
   const online = session.connectionState === "connected";
@@ -173,8 +224,8 @@ export default function App() {
 
         <SessionList
           activeThreadId={session.threadId}
-          onSelect={(_threadId: string) => {
-            handleNewSession();
+          onSelect={(threadId: string) => {
+            handleSelectSession(threadId);
           }}
           onNewSession={handleNewSession}
         />
@@ -297,14 +348,37 @@ export default function App() {
 
         <TaskHistory
           activeThreadId={session.threadId}
-          onSelect={(_threadId: string) => {
-            handleNewSession();
+          onSelect={(threadId: string) => {
+            handleSelectSession(threadId);
           }}
           visible={showHistory}
           onClose={() => setShowHistory(false)}
         />
 
         <section className="chat-stream-panel" ref={streamRef}>
+          {session.isViewingHistory && (
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                padding: "8px 16px",
+                background: "#fff7e6",
+                borderBottom: "1px solid #ffd591",
+                marginBottom: 8,
+              }}
+            >
+              <span>
+                📖 正在查看历史会话：<strong>{session.viewingSessionTitle}</strong>
+                {session.isLoadingHistory ? " (加载中...)" : ""}
+              </span>
+              <Space>
+                <Button size="small" onClick={handleNewSession} type="primary">
+                  新建研搜
+                </Button>
+              </Space>
+            </div>
+          )}
           <ConversationThread
             onUseExample={setQuery}
             turns={turns}
@@ -328,4 +402,14 @@ export default function App() {
       </main>
     </div>
   );
+}
+
+export default function App() {
+  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+
+  if (!loggedIn) {
+    return <LoginPage onLoginSuccess={() => setLoggedIn(true)} />;
+  }
+
+  return <AuthenticatedApp />;
 }
