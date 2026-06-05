@@ -76,5 +76,19 @@ docs/
 # Eval generated artifacts
 tests/eval/eval_report.json
 
+# Claude Code config
+.claude/
+
+# Superpowers brainstorming
+.superpowers/
+
+# Windows convenience scripts
+run.ps1
+run.bat
+
+# ChromaDB persistent data
+*.sqlite3
+app/self_rag_data/
+
 # Coverage
 .coverage
