@@ -126,7 +126,6 @@ def get_table_data(table_name) -> str:
         with connect(**config) as conn:
             with conn.cursor() as cursor:
                 # 白名单校验：只允许字母、数字、下划线，防止 SQL 注入
-                import re
                 if not re.fullmatch(r'\w+', table_name):
                     return f"非法的表名：{table_name}"
                 sql = f"SELECT * FROM {table_name} LIMIT 100"
@@ -147,8 +146,8 @@ def get_table_data(table_name) -> str:
                 rows = cursor.fetchall()
 
                 # 把每一行数据从元组转成 CSV 行文本
-                # 例如：(1, "张三", 18) -> "1,张三,18"
-                results = [",".join(map(str, row)) for row in rows]
+                # NULL 值转换为空字符串，避免 "None" 字符串干扰 LLM 分析
+                results = [",".join("" if v is None else str(v) for v in row) for row in rows]
 
                 # columns 组成 CSV 头部，rows 组成 CSV 数据体
                 # 最终返回：
@@ -249,31 +248,31 @@ def execute_sql_query(query) -> str:
                     # 执行校验后的安全查询
                     cursor.execute(safe_query)
 
-                description = cursor.description
-                if not description:
-                    return f"执行自定义 SQL 语句没有查询结果，SQL 为：{query}"
+                    description = cursor.description
+                    if not description:
+                        return f"执行自定义 SQL 语句没有查询结果，SQL 为：{query}"
 
-                columns = [desc[0] for desc in description]
+                    columns = [desc[0] for desc in description]
 
-                # 限制返回行数
-                rows = cursor.fetchmany(MAX_SQL_ROWS)
+                    # 限制返回行数
+                    rows = cursor.fetchmany(MAX_SQL_ROWS)
 
-                if len(rows) == MAX_SQL_ROWS:
-                    # 检查是否还有更多数据
-                    has_more = cursor.fetchone() is not None
-                    truncation_note = (
-                        "\n\n> ⚠️ 结果已截断，仅显示前 1000 行。请添加更精确的 WHERE 条件缩小范围。"
-                        if has_more
-                        else ""
-                    )
-                else:
-                    truncation_note = ""
+                    if len(rows) == MAX_SQL_ROWS:
+                        # 检查是否还有更多数据
+                        has_more = cursor.fetchone() is not None
+                        truncation_note = (
+                            "\n\n> ⚠️ 结果已截断，仅显示前 1000 行。请添加更精确的 WHERE 条件缩小范围。"
+                            if has_more
+                            else ""
+                        )
+                    else:
+                        truncation_note = ""
 
-                results = [",".join(map(str, row)) for row in rows]
+                    results = [",".join("" if v is None else str(v) for v in row) for row in rows]
 
-                header_str = ",".join(columns)
-                data_str = "\n".join(results)
-                return f"{header_str}\n{data_str}{truncation_note}"
+                    header_str = ",".join(columns)
+                    data_str = "\n".join(results)
+                    return f"{header_str}\n{data_str}{truncation_note}"
     except Error as e:
         return f"查询出现异常：{str(e)}"
 

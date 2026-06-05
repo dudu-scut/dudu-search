@@ -64,7 +64,7 @@ async def run_single_case(case: dict) -> EvalResult:
             return_value={"title": "eval", "facts": []}
         )
 
-        # Mock PostgresSaver（langgraph 的 checkpointer）
+        # Mock AsyncPostgresSaver（langgraph 的异步 checkpointer）
         mock_saver = MagicMock()
         mock_saver_cls = MagicMock()
         mock_saver_cls.from_conn_string = MagicMock(return_value=mock_saver)
@@ -75,7 +75,7 @@ async def run_single_case(case: dict) -> EvalResult:
             return_value=mock_agent,
         ):
             with patch(
-                "app.agent.main_agent.PostgresSaver",
+                "app.agent.main_agent.AsyncPostgresSaver",
                 mock_saver_cls,
             ):
                 with patch(

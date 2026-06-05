@@ -7,6 +7,7 @@ WebSocket 长连接。HTTP 接口只做轻量调度，真正的 DeepAgents 执�
 """
 
 import asyncio
+import json
 import mimetypes
 import os
 import re
@@ -97,7 +98,7 @@ async def lifespan(_app: FastAPI):
     # 服务关闭时：清理资源
     logger.info("正在关闭服务...")
 
-    # 1. 取消所有正在执行的后台任务
+    # 1. 取消所有正在执行的后台任务（通过 Redis 信号 + ARQ job abort）
     active_ids = []
     try:
         active_ids = await get_active_task_ids()
@@ -105,21 +106,24 @@ async def lifespan(_app: FastAPI):
         pass
     logger.info("正在取消活跃任务", count=len(active_ids))
     for thread_id in active_ids:
-        if thread_id in active_tasks:
-            task = active_tasks[thread_id]
-            if not task.done():
-                try:
-                    task.cancel()
-                except Exception as e:
-                    logger.warning("取消任务失败", thread_id=thread_id, exc_info=True)
-
-    if active_tasks:
+        # 通过 Redis 取消信号通知 Worker
         try:
-            await asyncio.sleep(0.5)
-        except:
+            await redis.set(f"cancel:{thread_id}", "1", ex=60)
+        except Exception:
+            pass
+        # 尝试通过 ARQ 中止任务
+        try:
+            arq_client = _app.state.arq_client
+            if arq_client:
+                job_id = await redis.get(f"task_job:{thread_id}")
+                if job_id:
+                    job = await arq_client.get_job(job_id)
+                    if job:
+                        await job.abort()
+        except Exception:
             pass
 
-    # 2. 清理任务注册表
+    # 2. 清理本地任务注册表
     active_tasks.clear()
 
     # 3. 关闭所有 WebSocket 连接
@@ -434,7 +438,7 @@ class TaskRequest(BaseModel):
     """前端启动任务时提交的请求体。"""
 
     query: str
-    thread_id: str = None
+    thread_id: str | None = None
 
 
 def _forget_task(thread_id: str, task: asyncio.Task) -> None:
@@ -451,7 +455,7 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
 
 
 @app.post("/api/task")
-async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_user)):
+async def run_task(body: TaskRequest, request: Request, user: UserInfo = Depends(get_current_user)):
     """
     启动一次 DeepAgents 后台任务。
 
@@ -459,9 +463,9 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
     后续执行轨迹、子智能体调用和最终答案都会由 monitor 通过 `/ws/{thread_id}`
     推送给同一会话的前端。
     """
-    thread_id = request.thread_id or str(uuid.uuid4())
+    thread_id = body.thread_id or str(uuid.uuid4())
 
-    if not request.query.strip():
+    if not body.query.strip():
         raise HTTPException(status_code=422, detail="查询内容不能为空")
 
     # 用户并发检查（Redis 计数器）
@@ -488,14 +492,18 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
             VALUES ($1, $2, 'queued', $3, $4)
             ON CONFLICT (thread_id) DO UPDATE SET status = 'queued'
             """,
-            thread_id, request.query[:100], user.id, user.group_id,
+            thread_id, body.query[:100], user.id, user.group_id,
         )
 
-    # 入队到 ARQ Worker
-    arq_client = request.app.state.arq_client
-    job = await arq_client.enqueue_job(
-        "run_agent_task", request.query, thread_id, user.id, user.group_id,
-    )
+    # 入队到 ARQ Worker（try-finally 保证入队失败时释放并发配额）
+    try:
+        arq_client = request.app.state.arq_client
+        job = await arq_client.enqueue_job(
+            "run_agent_task", body.query, thread_id, user.id, user.group_id,
+        )
+    except Exception:
+        await redis.decr(user_task_key)
+        raise
 
     # 存储 thread_id → job_id 映射，方便取消时查找 ARQ job
     await redis.set(f"task_job:{thread_id}", job.job_id, ex=3600)
@@ -510,7 +518,7 @@ async def run_task(request: TaskRequest, user: UserInfo = Depends(get_current_us
 
 
 @app.post("/api/task/{thread_id}/cancel")
-async def cancel_task(thread_id: str, user: UserInfo = Depends(get_current_user)):
+async def cancel_task(thread_id: str, request: Request, user: UserInfo = Depends(get_current_user)):
     """
     取消指定 thread_id 对应的后台 Agent 任务。
 
@@ -663,10 +671,17 @@ async def upload_files(
         if error:
             raise ValidationError(error)
 
-        file_path = target_dir / file.filename
+        # 防御路径穿越：提取纯文件名，拒绝含目录组件的恶意文件名
+        safe_filename = Path(file.filename).name
+        if safe_filename != file.filename:
+            raise ValidationError(f"文件名包含非法路径字符: {file.filename}")
+        if not safe_filename or safe_filename in (".", ".."):
+            raise ValidationError("无效的文件名")
+
+        file_path = target_dir / safe_filename
         with file_path.open("wb") as buffer:
             buffer.write(content)
-        saved_files.append(file.filename)
+        saved_files.append(safe_filename)
 
     return {"status": "uploaded", "files": saved_files}
 
@@ -800,7 +815,6 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         # 先从 Redis 拉缓存事件
         cached = await redis.lrange(key, 0, -1)
         if cached:
-            import json
             for event_json in reversed(cached):  # 最旧在前
                 event = json.loads(event_json)
                 await websocket.send_json({"type": "replay", "event": event})
@@ -834,24 +848,50 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     except Exception as e:
         logger.warning("历史事件推送失败", thread_id=thread_id, exc_info=True)
 
-    # 2. 连接建立后按 thread_id 注册，monitor 后续才能把事件定向推给当前页面
-    manager.active_connections[thread_id] = websocket
+    # 2. 通过 ConnectionManager 注册连接，保证原子性和后续定向推送
+    # (websocket 已在上面 accept，这里只做注册)
+    await manager.register(websocket, thread_id)
 
+    async def _receive_loop():
+        """接收前端心跳 ping，维持连接活跃。"""
+        try:
+            while True:
+                data = await websocket.receive_text()
+                if data == "ping":
+                    await websocket.send_text("pong")
+        except WebSocketDisconnect:
+            pass
+
+    async def _redis_forward_loop():
+        """订阅 Redis Pub/Sub 频道，实时转发 Worker 事件到前端。"""
+        try:
+            from app.storage.redis_client import subscribe_ws_events
+            logger.info("Redis Pub/Sub 订阅已启动", thread_id=thread_id)
+            async for event_json in subscribe_ws_events(thread_id):
+                try:
+                    event = json.loads(event_json)
+                    await websocket.send_json(event)
+                    logger.info("事件已转发到前端", thread_id=thread_id, event_type=event.get("event", "?"))
+                except Exception as e:
+                    logger.warning("事件转发失败", thread_id=thread_id, error=str(e))
+        except Exception as e:
+            logger.warning("Redis Pub/Sub 订阅异常退出", thread_id=thread_id, error=str(e), exc_info=True)
+
+    # 并行运行接收循环和 Redis 转发，任一结束即断开
     try:
-        while True:
-            # 前端通常发送 ping 心跳；服务端回复 pong，顺便维持连接活跃
-            data = await websocket.receive_text()
-            if data == "ping":
-                await websocket.send_text("pong")
-
+        receive_task = asyncio.create_task(_receive_loop())
+        redis_task = asyncio.create_task(_redis_forward_loop())
+        done, pending = await asyncio.wait(
+            [receive_task, redis_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for task in pending:
+            task.cancel()
     except WebSocketDisconnect:
-        # 只移除当前 WebSocket 实例，避免旧连接断开时误删同 thread_id 的新连接
+        pass
+    finally:
         manager.disconnect(websocket, thread_id)
         logger.info("WebSocket 客户端已断开", thread_id=thread_id)
-
-    except Exception as e:
-        logger.warning("WebSocket 连接异常", exc_info=True)
-        manager.disconnect(websocket, thread_id)
 
 
 # ---- 会话历史管理 API ----
@@ -1130,7 +1170,8 @@ async def list_kbs(
 ):
     """列出当前用户组可见的自建 RAG 知识库。管理员可见全部。"""
     engine = get_rag_engine()
-    filter_group_id = None if user.is_admin else user.group_id
+    # 防御性兜底：未分配组的用户默认归入组 1，避免看到全量数据
+    filter_group_id = None if user.is_admin else (user.group_id if user.group_id is not None else 1)
     return {"knowledge_bases": engine.list_kbs(group_id=filter_group_id)}
 
 
@@ -1171,7 +1212,13 @@ async def ingest_files(
 
     results = {}
     for file in files:
-        file_path = doc_dir / file.filename
+        # 防御路径穿越：提取纯文件名
+        safe_filename = Path(file.filename).name
+        if safe_filename != file.filename or safe_filename in (".", "..") or not safe_filename:
+            results[file.filename] = "文件名包含非法路径字符，已拒绝"
+            continue
+
+        file_path = doc_dir / safe_filename
         with file_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
         try:

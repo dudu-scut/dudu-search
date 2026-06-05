@@ -8,6 +8,7 @@ session_id 创建独立工作目录，并把工具调用、子智能体调用和
 
 import asyncio
 import shutil
+import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from deepagents import create_deep_agent
 
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from app.agent.llm import model
 from app.config import settings
@@ -45,6 +46,9 @@ from app.tools.upload_file_read_tool import read_file_content
 # 基础工具和子智能体列表在所有 agent 实例间共享
 _BASE_TOOLS = [generate_markdown, convert_md_to_pdf, read_file_content]
 _BASE_SUBAGENTS = [database_query_agent, network_search_agent, knowledge_base_agent]
+
+# 限制并发持久化任务数，防止流式输出过快耗尽连接池
+_PERSIST_SEMAPHORE = asyncio.Semaphore(5)
 
 
 # ── LLM 重试逻辑 ──
@@ -92,27 +96,33 @@ async def _retryable_astream(agent, input_data, config):
             return
         except Exception as e:
             last_exception = e
+            logger.warning(
+                "Agent 流式执行失败",
+                wait_time=2 ** attempt if attempt < 2 else 0,
+                attempt=f"{attempt+1}/3",
+                error_type=type(e).__name__,
+                error_repr=repr(e),
+                exc_info=True,
+            )
             if not _is_retryable_error(e) or attempt == 2:
                 break
-            wait_time = 2 ** attempt
-            logger.warning("Agent 流式执行失败，即将重试", wait_time=wait_time, attempt=f"{attempt+1}/3", exc_info=True)
-            await asyncio.sleep(wait_time)
+            await asyncio.sleep(2 ** attempt)
 
+    error_detail = f"{type(last_exception).__name__}: {last_exception!r}"
     if isinstance(last_exception, (httpx.ReadTimeout, TimeoutError)):
-        raise LLMTimeoutError(f"Agent 流式执行超时，已重试 3 次: {last_exception}")
-    raise LLMError(f"Agent 流式执行失败: {last_exception}")
+        raise LLMTimeoutError(f"Agent 流式执行超时，已重试 3 次: {error_detail}")
+    raise LLMError(f"Agent 流式执行失败（已重试 3 次）: {error_detail}")
 
 
-def _build_main_agent(current_date: str):
+def _build_main_agent(current_date: str, checkpointer=None):
     """按当前日期构建主智能体，确保系统提示词包含正确的时间信息。
 
     DeepAgents 子智能体在独立会话中运行，无法读取父会话用户消息，
     因此日期必须写进系统提示词，子智能体才能感知。
 
-    使用 PostgresSaver 替代 InMemorySaver，实现检查点持久化。
+    checkpointer 由调用方负责生命周期管理（AsyncPostgresSaver 需要在
+    async with 上下文中使用，退出上下文时连接池会关闭）。
     """
-    postgres_uri = settings.POSTGRES_SYNC_URI
-    checkpointer = PostgresSaver.from_conn_string(postgres_uri)
     return create_deep_agent(
         model=model,
         system_prompt=main_agent_content["system_prompt"].format(
@@ -128,15 +138,16 @@ project_root_path = Path(__file__).parents[1].resolve()
 
 
 async def _persist_message(thread_id: str, role: str, content: str) -> None:
-    """异步持久化单条消息到 PostgreSQL。"""
+    """异步持久化单条消息到 PostgreSQL（受信号量限流，保护连接池）。"""
     try:
-        from app.storage.db import get_pool
-        pool = await get_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO messages (thread_id, role, content) VALUES ($1, $2, $3)",
-                thread_id, role, content,
-            )
+        async with _PERSIST_SEMAPHORE:
+            from app.storage.db import get_pool
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO messages (thread_id, role, content) VALUES ($1, $2, $3)",
+                    thread_id, role, content,
+                )
     except Exception as e:
         logger.warning("消息持久化失败", exc_info=True)
 
@@ -221,8 +232,8 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     if group_id is not None:
         set_current_group_id(group_id)
 
-    # 持久化会话记录
-    asyncio.create_task(_ensure_session(session_id, group_id))
+    # 持久化会话记录（确保在 agent 执行前会话记录已存在）
+    await _ensure_session(session_id, group_id)
 
     # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
     session_dir = project_root_path / "output" / f"session_{session_id}"
@@ -266,92 +277,114 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     now = datetime.now(timezone(timedelta(hours=8)))
     time_context = now.strftime("%Y年%m月%d日 %H:%M (UTC+8)")
 
-    # 按当前日期构建 agent，确保主智能体和子智能体的系统提示词都包含正确时间
-    agent = _build_main_agent(time_context)
+    # AsyncPostgresSaver 的 async with 管理连接池生命周期：
+    # agent 构建 + astream 执行必须在同一个上下文内，退出时连接池关闭
+    postgres_uri = settings.POSTGRES_SYNC_URI
+    async with AsyncPostgresSaver.from_conn_string(postgres_uri) as checkpointer:
+        # 确保 checkpoint/migration 表存在（幂等操作）
+        await checkpointer.setup()
 
-    # 工作环境指令是运行时动态补充的，约束模型只在当前会话目录读写文件
-    path_instruction = f"""
-    【工作环境指令】
-    工作目录: {relative_session_dir_str}
-    {updated_info_prompt}
+        # 按当前日期构建 agent，确保主智能体和子智能体的系统提示词都包含正确时间
+        agent = _build_main_agent(time_context, checkpointer=checkpointer)
 
-    规则：
-    1. 新生成文件必须保存到工作目录：'{relative_session_dir_str}/filename'
-    2. 读取已上传的文件时，请直接将文件名（例如：'开篇.txt'）作为 filename 参数传入（read_file_content）读取工具，不要带上任何目录前缀。
-    3. 使用相对路径，禁止使用绝对路径
-    4. 若存在上传文件，请先分析内容
-    """
+        # 工作环境指令是运行时动态补充的，约束模型只在当前会话目录读写文件
+        path_instruction = f"""
+        【工作环境指令】
+        工作目录: {relative_session_dir_str}
+        {updated_info_prompt}
 
-    # 检索并注入相关记忆上下文
-    memory_context = ""
-    try:
-        memory_service = get_memory_service()
-        memory_context = await memory_service.build_context(session_id, task_query)
-    except Exception as e:
-        logger.warning("记忆上下文获取失败", exc_info=True)
+        规则：
+        1. 新生成文件必须保存到工作目录：'{relative_session_dir_str}/filename'
+        2. 读取已上传的文件时，请直接将文件名（例如：'开篇.txt'）作为 filename 参数传入（read_file_content）读取工具，不要带上任何目录前缀。
+        3. 使用相对路径，禁止使用绝对路径
+        4. 若存在上传文件，请先分析内容
+        """
 
-    full_query = task_query + path_instruction
-    if memory_context:
-        full_query = (
-            f"【记忆上下文 — 请参考以下信息辅助本次任务】\n"
-            f"{memory_context}\n\n"
-            f"【用户问题】\n{full_query}"
-        )
-
-    try:
-        # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
-        # 使用 _retryable_astream 包装，网络异常时自动重试
-        async for chunk in _retryable_astream(
-            agent,
-            {"messages": [{"role": "user", "content": full_query}]},
-            config=config,
-        ):
-            # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
-            for node_name, state in chunk.items():
-                if not state or "messages" not in state:
-                    continue
-                messages = state["messages"]
-                if messages and isinstance(messages, list):
-                    last_msg = messages[-1]
-                    if node_name == "model":
-                        if last_msg.tool_calls:
-                            # DeepAgents 调用子智能体时，本质上会产生名为 task 的工具调用
-                            for tool_call in last_msg.tool_calls:
-                                if tool_call["name"] == "task":
-                                    # 子智能体调用单独上报，前端可以展示“正在调用哪个专家助手”
-                                    monitor.report_assistant(
-                                        tool_call["args"]["subagent_type"],
-                                        {
-                                            "description": tool_call["args"][
-                                                "description"
-                                            ]
-                                        },
-                                    )
-                        elif last_msg.content:
-                            # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            logger.info("主智能体执行结果", result_preview=last_msg.content[:100])
-                            monitor.report_task_result(last_msg.content)
-                            # 持久化 assistant 消息
-                            asyncio.create_task(_persist_message(
-                                session_id, "assistant", last_msg.content
-                            ))
-
-    except asyncio.CancelledError:
-        monitor.report_task_cancelled()
-        raise
-    except Exception as e:
-        # 异步执行异常也走 monitor，保证前端能收到明确错误事件
-        monitor._emit("error", f"执行主智能发生异常信息：{str(e)}")
-    finally:
-        # 标记会话完成
-        asyncio.create_task(_complete_session(session_id))
-        # 异步触发记忆巩固（不阻塞会话完成）
+        # 检索并注入相关记忆上下文
+        memory_context = ""
         try:
-            asyncio.create_task(_run_memory_consolidation(session_id))
-        except Exception:
-            pass
-        # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
-        reset_session_context(session_dir_token, session_id_token)
+            memory_service = get_memory_service()
+            memory_context = await memory_service.build_context(session_id, task_query)
+        except Exception as e:
+            logger.warning("记忆上下文获取失败", exc_info=True)
+
+        full_query = task_query + path_instruction
+        if memory_context:
+            full_query = (
+                f"【记忆上下文 — 请参考以下信息辅助本次任务】\n"
+                f"{memory_context}\n\n"
+                f"【用户问题】\n{full_query}"
+            )
+
+        # 持久化用户消息，确保历史会话查看时能看到完整对话
+        asyncio.create_task(_persist_message(session_id, "user", task_query))
+
+        try:
+            # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
+            # 使用 _retryable_astream 包装，网络异常时自动重试
+            async for chunk in _retryable_astream(
+                agent,
+                {"messages": [{"role": "user", "content": full_query}]},
+                config=config,
+            ):
+                # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
+                for node_name, state in chunk.items():
+                    if not state or "messages" not in state:
+                        continue
+                    messages = state["messages"]
+                    if messages and isinstance(messages, list):
+                        last_msg = messages[-1]
+                        if node_name == "model":
+                            if last_msg.tool_calls:
+                                # DeepAgents 调用子智能体时，本质上会产生名为 task 的工具调用
+                                for tool_call in last_msg.tool_calls:
+                                    if tool_call["name"] == "task":
+                                        # 子智能体调用单独上报，前端可以展示"正在调用哪个专家助手"
+                                        monitor.report_assistant(
+                                            tool_call["args"]["subagent_type"],
+                                            {
+                                                "description": tool_call["args"][
+                                                    "description"
+                                                ]
+                                            },
+                                        )
+                            elif last_msg.content:
+                                # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
+                                logger.info("主智能体执行结果", result_preview=last_msg.content[:100])
+                                monitor.report_task_result(last_msg.content)
+                                # 持久化 assistant 消息
+                                asyncio.create_task(_persist_message(
+                                    session_id, "assistant", last_msg.content
+                                ))
+
+        except asyncio.CancelledError:
+            monitor.report_task_cancelled()
+            raise
+        except Exception as e:
+            # 异步执行异常也走 monitor，保证前端能收到明确错误事件
+            logger.error(
+                "主智能体执行异常",
+                error_type=type(e).__name__,
+                error_message=str(e),
+                error_repr=repr(e),
+                exc_info=True,
+            )
+            monitor._emit(
+                "error",
+                f"执行主智能体发生异常：{type(e).__name__}: {e}",
+            )
+            raise  # 重新抛出，让 Worker 将会话标记为 failed
+        finally:
+            # 标记会话完成（仅在正常完成时；异常/取消时 Worker 会覆盖状态）
+            if sys.exc_info()[0] is None:
+                asyncio.create_task(_complete_session(session_id))
+            # 异步触发记忆巩固（不阻塞会话完成）
+            try:
+                asyncio.create_task(_run_memory_consolidation(session_id))
+            except Exception:
+                pass
+            # 任务结束后恢复 ContextVar，避免后续请求复用到本次会话目录或 thread_id
+            reset_session_context(session_dir_token, session_id_token)
 
 
 if __name__ == "__main__":

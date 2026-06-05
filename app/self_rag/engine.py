@@ -145,7 +145,7 @@ class RAGEngine:
 
         docs = results["documents"]
         ids = results["ids"]
-        metadatas = results.get("metadatas") or [{}] * len(docs)
+        metadatas = results.get("metadatas") or [{} for _ in range(len(docs))]
 
         tokenized = [self._tokenize(doc) for doc in docs]
         self._bm25_indices[kb_name] = BM25Okapi(tokenized)

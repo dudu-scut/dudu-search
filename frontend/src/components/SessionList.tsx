@@ -20,14 +20,16 @@ interface Props {
 export default function SessionList({ activeThreadId, onSelect, onNewSession }: Props) {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const loadSessions = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const res = await listSessions();
       setSessions(res.sessions);
-    } catch {
-      // 静默失败
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载会话列表失败");
     } finally {
       setLoading(false);
     }
@@ -71,7 +73,20 @@ export default function SessionList({ activeThreadId, onSelect, onNewSession }: 
           onClick={onNewSession}
         />
       </div>
-      {loading && sessions.length === 0 ? (
+      {error ? (
+        <div style={{ textAlign: "center", padding: 16 }}>
+          <Text type="danger" style={{ fontSize: 12 }}>{error}</Text>
+          <br />
+          <Button
+            size="small"
+            type="link"
+            onClick={() => loadSessions()}
+            style={{ fontSize: 12, padding: 0 }}
+          >
+            重试
+          </Button>
+        </div>
+      ) : loading && sessions.length === 0 ? (
         <div style={{ textAlign: "center", padding: 16 }}>
           <Spin indicator={<LoadingOutlined />} size="small" />
         </div>

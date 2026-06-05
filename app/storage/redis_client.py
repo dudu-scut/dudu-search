@@ -3,6 +3,7 @@ Redis 客户端管理。
 
 提供异步 Redis 客户端的创建、关闭，以及热状态操作的辅助方法。
 """
+import asyncio
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -12,15 +13,23 @@ from app.config import settings
 REDIS_URI = settings.REDIS_URI
 
 _client: Optional[aioredis.Redis] = None
+_lock = asyncio.Lock()
 
 
 async def get_redis() -> aioredis.Redis:
-    """获取或创建异步 Redis 客户端（懒初始化）。"""
+    """获取或创建异步 Redis 客户端（懒初始化 + 双重检查锁）。"""
     global _client
     if _client is not None:
         return _client
-    _client = aioredis.from_url(REDIS_URI, decode_responses=True)
-    return _client
+    async with _lock:
+        if _client is not None:
+            return _client
+        _client = aioredis.from_url(REDIS_URI, decode_responses=True)
+        return _client
+
+
+# 别名：server.py / worker.py 中多处使用了 get_redis_client 这个名字
+get_redis_client = get_redis
 
 
 async def close_redis() -> None:
@@ -60,7 +69,7 @@ async def get_active_task_ids() -> list[str]:
 async def cache_ws_event(thread_id: str, event_json: str, ttl: int = 604800) -> None:
     """缓存 WebSocket 事件到 Redis List（7天 TTL）。"""
     r = await get_redis()
-    key = f"ws_events:{thread_id}"
+    key = f"ws:events:{thread_id}"  # 与 cache_event 使用相同前缀
     pipe = r.pipeline()
     pipe.lpush(key, event_json)
     pipe.ltrim(key, 0, 499)  # 每个线程最多保留 500 条事件
@@ -83,5 +92,39 @@ async def cache_event(thread_id: str, event: dict) -> None:
 async def get_cached_ws_events(thread_id: str, count: int = 50) -> list[str]:
     """获取缓存的 WebSocket 事件。"""
     r = await get_redis()
-    key = f"ws_events:{thread_id}"
+    key = f"ws:events:{thread_id}"  # 与 cache_event 使用相同前缀
     return await r.lrange(key, 0, count - 1)
+
+
+# ── Redis Pub/Sub：跨进程 WebSocket 事件桥接 ──
+# Worker 进程通过 publish 把事件推到 Redis 频道，
+# Server 进程通过 subscribe 监听频道并转发到 WebSocket。
+
+_WS_CHANNEL_PREFIX = "ws:channel"
+
+
+def _ws_channel(thread_id: str) -> str:
+    return f"{_WS_CHANNEL_PREFIX}:{thread_id}"
+
+
+async def publish_ws_event(thread_id: str, event_json: str) -> None:
+    """向 Redis Pub/Sub 频道发布 WebSocket 事件（Worker 进程调用）。"""
+    r = await get_redis()
+    await r.publish(_ws_channel(thread_id), event_json)
+
+
+async def subscribe_ws_events(thread_id: str):
+    """订阅指定 thread_id 的 WebSocket 事件频道，返回异步生成器。
+
+    Server 进程的 WebSocket 端点使用此生成器获取 Worker 推送的实时事件。
+    用法:
+        async for event_json in subscribe_ws_events(thread_id):
+            ...
+    """
+    r = await get_redis()
+    async with r.pubsub() as pubsub:
+        channel = _ws_channel(thread_id)
+        await pubsub.subscribe(channel)
+        async for message in pubsub.listen():
+            if message["type"] == "message":
+                yield message["data"]

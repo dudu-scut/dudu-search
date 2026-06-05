@@ -5,6 +5,7 @@
 """
 
 from arq.connections import RedisSettings
+from arq.cron import CronJob
 from app.config import settings as app_settings
 from app.logging_config import get_logger
 from app.tasks.cleanup import cleanup_expired_sessions
@@ -89,8 +90,9 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
             agent_task = _asyncio.create_task(run_deep_agent(query, thread_id))
 
             # 等待 agent 完成或取消信号
+            cancel_waiter = _asyncio.create_task(cancel_event.wait())
             done, pending = await _asyncio.wait(
-                [agent_task, _asyncio.create_task(cancel_event.wait())],
+                [agent_task, cancel_waiter],
                 return_when=_asyncio.FIRST_COMPLETED,
             )
 
@@ -102,6 +104,14 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
                 except _asyncio.CancelledError:
                     pass
                 raise _asyncio.CancelledError("任务已被用户取消")
+
+            # agent 先完成 → 清理 cancel_waiter，避免任务泄漏
+            if not cancel_waiter.done():
+                cancel_waiter.cancel()
+                try:
+                    await cancel_waiter
+                except _asyncio.CancelledError:
+                    pass
 
             # agent 正常完成
             await agent_task  # 获取可能的异常
@@ -185,10 +195,24 @@ class WorkerSettings:
     # 定时任务
     cron_jobs = [
         # 每天凌晨 3 点执行过期会话清理
-        {
-            "coroutine": cleanup_expired_sessions,
-            "cron": "0 3 * * *",  # 分 时 日 月 周
-        }
+        CronJob(
+            name="cleanup_expired_sessions",
+            coroutine=cleanup_expired_sessions,
+            month=None,
+            day=None,
+            weekday=None,
+            hour=3,
+            minute=0,
+            second=0,
+            microsecond=0,
+            run_at_startup=False,
+            unique=True,
+            job_id=None,
+            timeout_s=None,
+            keep_result_s=None,
+            keep_result_forever=None,
+            max_tries=None,
+        ),
     ]
 
     # 启动和关闭

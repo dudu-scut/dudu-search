@@ -3,7 +3,7 @@ import { getToken } from "./auth";
 import type { CancelTaskResponse, FileListResponse, SessionDetail, SessionListResponse, TaskResponse, UploadResponse } from "../types";
 
 function apiUrl(path: string): string {
-  return `${API_BASE_URL}${path}`;
+  return API_BASE_URL ? `${API_BASE_URL}${path}` : `${window.location.origin}${path}`;
 }
 
 function authHeader(): Record<string, string> {

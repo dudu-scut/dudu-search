@@ -1,9 +1,19 @@
 """统一配置模块 — 所有环境变量从这里读取，启动时自动校验必填项。"""
 
 import sys
-from pydantic import AliasChoices, Field
+from pathlib import Path
+from pydantic import AliasChoices, ConfigDict, Field
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+# 计算 .env 文件的绝对路径，确保无论从哪个目录启动都能找到配置文件
+_ENV_FILE = str(Path(__file__).resolve().parent.parent / ".env")
+
+# Windows 下 psycopg async 需要 SelectorEventLoop（ProactorEventLoop 不兼容）
+# 必须在任何 asyncio.run() 之前设置，确保 Worker 和 Server 都使用正确的事件循环
+if sys.platform == "win32":
+    import asyncio as _asyncio
+    _asyncio.set_event_loop_policy(_asyncio.WindowsSelectorEventLoopPolicy())
 
 
 class Settings(BaseSettings):
@@ -71,6 +81,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("EMBEDDING_MODEL", "SELF_RAG_EMBEDDING_MODEL")
     )
     EMBEDDING_DIM: int = Field(512, validation_alias=AliasChoices("EMBEDDING_DIM", "MEMORY_EMBEDDING_DIM"))
+    # HuggingFace 镜像站（国内环境使用 https://hf-mirror.com 加速模型下载）
+    HF_ENDPOINT: str = "https://huggingface.co"
 
     # ── 外部 API ──
     TAVILY_API_KEY: str = ""
@@ -106,10 +118,11 @@ class Settings(BaseSettings):
     # ── 会话清理 ──
     SESSION_RETENTION_DAYS: int = 90
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = True
+    model_config = ConfigDict(
+        env_file=_ENV_FILE,
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+    )
 
 
 _settings: Optional[Settings] = None
@@ -141,3 +154,8 @@ def _validate_required(s: Settings) -> None:
 
 # 模块级快捷访问
 settings = get_settings()
+
+# 尽早设置 HF_ENDPOINT，确保 sentence-transformers 加载模型时使用镜像站
+# 这必须在任何 SentenceTransformer 实例化之前执行
+import os as _os
+_os.environ["HF_ENDPOINT"] = settings.HF_ENDPOINT

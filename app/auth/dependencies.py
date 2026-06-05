@@ -68,14 +68,19 @@ async def get_optional_user(
 def get_group_filter(user: UserInfo = Depends(get_current_user)) -> Tuple[Optional[int], str]:
     """返回 (group_id, SQL WHERE clause) 用于数据隔离过滤。
 
-    管理员可以看到所有组的数据。
+    管理员可以看到所有组的数据。普通用户只能看到自己所在组的数据。
+    如果 group_id 为 None（非管理员但未分配组），默认使用 group_id=1 防止数据泄漏。
 
     用法:
-        group_id, where_clause = get_group_filter(user)
+        group_id, filter_clause = get_group_filter(user)
+        # filter_clause 是完整的 WHERE 子句片段，例如 "group_id = $1" 或 "1=1"
         results = await conn.fetch(
-            f"SELECT * FROM sessions WHERE {where_clause}", group_id
+            f"SELECT * FROM sessions WHERE {filter_clause}", group_id
         )
     """
     if user.is_admin:
         return None, "1=1"
-    return user.group_id, "group_id = $1"
+    # 防御性兜底：未分配组的用户默认归入组 1，避免因 group_id=None 导致
+    # server.py 中 `if group_id is not None` 分支跳过，从而绕过组隔离
+    gid = user.group_id if user.group_id is not None else 1
+    return gid, "group_id = $1"

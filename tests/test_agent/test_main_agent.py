@@ -160,49 +160,47 @@ class TestBuildMainAgent:
     """_build_main_agent() / create_deep_agent 构建测试。"""
 
     def test_build_main_agent_mocked(self):
-        """使用 Mock 验证 _build_main_agent 能正常调用 create_deep_agent。"""
+        """使用 Mock 验证 _build_main_agent 能正常调用 create_deep_agent。
+
+        checkpointer 由调用方（run_deep_agent）传入，_build_main_agent 只负责
+        把参数透传给 create_deep_agent。
+        """
+        mock_checkpointer = MagicMock()
+
         with patch(
-            "app.agent.main_agent.PostgresSaver"
-        ) as mock_saver_cls:
-            mock_saver = MagicMock()
-            mock_saver_cls.from_conn_string.return_value = mock_saver
+            "app.agent.main_agent.create_deep_agent"
+        ) as mock_create:
+            mock_agent = MagicMock()
+            mock_create.return_value = mock_agent
 
-            with patch(
-                "app.agent.main_agent.create_deep_agent"
-            ) as mock_create:
-                mock_agent = MagicMock()
-                mock_create.return_value = mock_agent
+            from app.agent.main_agent import _build_main_agent
 
-                from app.agent.main_agent import _build_main_agent
+            agent = _build_main_agent(
+                "2026年05月31日 08:00 (UTC+8)", checkpointer=mock_checkpointer
+            )
 
-                agent = _build_main_agent("2026年05月31日 08:00 (UTC+8)")
+            # 验证返回的 agent 是 mock 对象
+            assert agent is mock_agent
 
-                # 验证返回的 agent 是 mock 对象
-                assert agent is mock_agent
-
-                # 验证 create_deep_agent 被调用
-                mock_create.assert_called_once()
-                call_kwargs = mock_create.call_args[1]
-                assert "model" in call_kwargs
-                assert "system_prompt" in call_kwargs
-                assert "tools" in call_kwargs
-                assert "checkpointer" in call_kwargs
-                assert call_kwargs["checkpointer"] is mock_saver
-                assert "subagents" in call_kwargs
+            # 验证 create_deep_agent 被调用，且参数被正确透传
+            mock_create.assert_called_once()
+            call_kwargs = mock_create.call_args[1]
+            assert "model" in call_kwargs
+            assert "system_prompt" in call_kwargs
+            assert "tools" in call_kwargs
+            assert "checkpointer" in call_kwargs
+            assert call_kwargs["checkpointer"] is mock_checkpointer
+            assert "subagents" in call_kwargs
 
     def test_build_without_tools(self):
         """验证 tools 参数来自 _BASE_TOOLS。"""
-        with patch("app.agent.main_agent.PostgresSaver") as mock_saver_cls:
-            mock_saver = MagicMock()
-            mock_saver_cls.from_conn_string.return_value = mock_saver
+        with patch("app.agent.main_agent.create_deep_agent") as mock_create:
+            mock_create.return_value = MagicMock()
 
-            with patch("app.agent.main_agent.create_deep_agent") as mock_create:
-                mock_create.return_value = MagicMock()
+            from app.agent.main_agent import _build_main_agent, _BASE_TOOLS
 
-                from app.agent.main_agent import _build_main_agent, _BASE_TOOLS
+            _build_main_agent("2026年05月31日 08:00 (UTC+8)")
 
-                _build_main_agent("2026年05月31日 08:00 (UTC+8)")
-
-                call_kwargs = mock_create.call_args[1]
-                assert call_kwargs["tools"] is _BASE_TOOLS
-                assert len(call_kwargs["tools"]) >= 3  # markdown, pdf, read_file
+            call_kwargs = mock_create.call_args[1]
+            assert call_kwargs["tools"] is _BASE_TOOLS
+            assert len(call_kwargs["tools"]) >= 3  # markdown, pdf, read_file

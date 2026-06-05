@@ -251,6 +251,10 @@ class MemoryService:
         """调用 LLM 提取摘要和事实（使用项目中已有的 model）。"""
         from app.agent.llm import model
 
+        # 截断对话内容，保留最后 N 字符以确保不超出模型上下文窗口
+        max_conv_chars = 8000
+        truncated = conversation if len(conversation) <= max_conv_chars else "…[对话较长，仅展示尾部]…\n" + conversation[-max_conv_chars:]
+
         prompt = f"""分析以下对话，完成三个任务：
 
 1. 生成一句标题（不超过20字）
@@ -259,7 +263,7 @@ class MemoryService:
 
 对话内容：
 ---
-{conversation[-4000:]}
+{truncated}
 ---
 
 请严格按照以下 JSON 格式输出（不要输出其他内容）：

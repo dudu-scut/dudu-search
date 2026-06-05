@@ -7,11 +7,7 @@
 import os
 from pathlib import Path
 
-from dotenv import find_dotenv, load_dotenv
-
 from app.config import settings
-
-load_dotenv(find_dotenv())
 
 # 统一嵌入模型配置：优先读 EMBEDDING_MODEL，兼容旧 SELF_RAG_EMBEDDING_MODEL
 EMBEDDING_MODEL = settings.EMBEDDING_MODEL

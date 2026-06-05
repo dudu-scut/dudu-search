@@ -77,13 +77,28 @@ class ToolMonitor:
                 pass
 
         # 写入 Redis 缓存（fire-and-forget，便于断线重连恢复）
+        # 同时发布到 Redis Pub/Sub 频道，让 Server 进程转发到 WebSocket
         thread_id = get_thread_context()
         if thread_id:
             try:
-                from app.storage.redis_client import cache_event
+                from app.storage.redis_client import cache_event, publish_ws_event
                 import json as _json
                 import asyncio as _asyncio
-                _asyncio.ensure_future(cache_event(thread_id, payload))
+
+                async def _cache_and_publish():
+                    try:
+                        await cache_event(thread_id, payload)
+                        pub_msg = _json.dumps(
+                            {"type": "monitor_event", "event": event_type, "message": message,
+                             "data": data or {}, "timestamp": payload["timestamp"]},
+                            ensure_ascii=False, default=str,
+                        )
+                        await publish_ws_event(thread_id, pub_msg)
+                        logger.debug("事件已缓存并发布", thread_id=thread_id, event_type=event_type)
+                    except Exception as e:
+                        logger.warning("事件缓存/发布失败", thread_id=thread_id, error=str(e))
+
+                _asyncio.ensure_future(_cache_and_publish())
             except Exception:
                 pass
 
@@ -126,14 +141,15 @@ class ToolMonitor:
             asyncio.run_coroutine_threadsafe(coroutine, manager_loop)
 
     async def _emit_error(self, code: str, message: str) -> None:
-        """发送错误事件到前端。"""
+        """发送错误事件到前端（通过 Redis Pub/Sub 跨进程广播）。"""
         payload = {
-            "type": "monitor_error",
+            "type": "monitor_event",
             "event": "error",
             "message": message,
             "data": {"code": code},
             "timestamp": datetime.datetime.now().isoformat(),
         }
+        # 1) 直接 WebSocket 推送（仅在 Server 进程中有效）
         if self.websocket_manager:
             try:
                 thread_id = get_thread_context()
@@ -142,6 +158,17 @@ class ToolMonitor:
                     self._send_to_websocket(payload, thread_id, manager_loop)
             except Exception:
                 pass
+        # 2) Redis Pub/Sub 跨进程桥接（Worker → Server → 前端）
+        try:
+            from app.storage.redis_client import publish_ws_event
+            import json as _json
+
+            pub_msg = _json.dumps(payload, ensure_ascii=False, default=str)
+            thread_id = get_thread_context()
+            if thread_id:
+                await publish_ws_event(thread_id, pub_msg)
+        except Exception:
+            pass
 
     def report_tool(
         self,
@@ -200,6 +227,11 @@ class ConnectionManager:
         self.loop = loop
         monitor.set_websocket_manager(self)
         logger.info("ConnectionManager 已绑定到事件循环", loop_id=id(self.loop))
+
+    async def register(self, websocket: WebSocket, thread_id: str) -> None:
+        """注册已接受的 WebSocket 连接（不重复 accept）。"""
+        self.active_connections[thread_id] = websocket
+        logger.info("客户端已注册", thread_id=thread_id)
 
     async def connect(self, websocket: WebSocket, thread_id: str) -> None:
         """接受 WebSocket 连接，并按 thread_id 保存"""

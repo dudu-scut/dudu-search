@@ -55,8 +55,8 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
         except Exception:
             pass
 
-        # 真实绝对路径且不在 session_dir 中时保持原样，避免误改外部资源路径
-        return str(full_path)
+        # 绝对路径不在 session_dir 内 → 拒绝，防御路径穿越攻击
+        raise ValueError(f"路径 '{path_str}' 不在当前会话目录内，操作被拒绝")
 
     parts = path.parts
 

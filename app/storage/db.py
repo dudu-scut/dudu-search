@@ -119,12 +119,12 @@ async def init_schema() -> None:
         """)
 
         # 迁移：确保 embedding 列维度为 512（修复旧数据库的 1536 维度问题）
+        # 注意：旧版本会静默删除所有记忆数据，现在改为仅提示手动迁移
         await conn.execute("""
             DO $$
             DECLARE
                 current_dim integer;
             BEGIN
-                -- Check current embedding dimension via pg_attribute
                 SELECT a.atttypmod INTO current_dim
                 FROM pg_attribute a
                 JOIN pg_class c ON a.attrelid = c.oid
@@ -134,11 +134,12 @@ async def init_schema() -> None:
 
                 -- vector(1536) has atttypmod = 1536 + 4 = 1540
                 -- vector(512)  has atttypmod = 512  + 4 = 516
-                -- Only migrate if the dimension is not already 512
-                IF current_dim IS NOT NULL AND current_dim != 516 THEN
-                    RAISE NOTICE 'Migrating long_term_memories embedding from dimension % to 512', current_dim - 4;
-                    DELETE FROM long_term_memories;
-                    ALTER TABLE long_term_memories ALTER COLUMN embedding TYPE vector(512);
+                IF current_dim IS NOT NULL AND current_dim > 0 AND current_dim != 516 THEN
+                    RAISE WARNING 'Embedding dimension mismatch (current=%, expected=512). '
+                        'Use SET embed_dim=%%; then DELETE FROM long_term_memories; '
+                        'ALTER TABLE long_term_memories ALTER COLUMN embedding TYPE vector(%%); '
+                        'to migrate manually.',
+                        current_dim - 4;
                 END IF;
             END $$;
         """)

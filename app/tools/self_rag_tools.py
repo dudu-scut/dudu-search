@@ -69,7 +69,10 @@ def query_knowledge_base(kb_name: str, question: str) -> str:
 
             # 校验当前用户组是否有权访问该知识库
             group_id = get_current_group_id()
-            if group_id is not None and not engine.check_kb_access(kb_name, group_id):
+            if group_id is None:
+                # 防御性兜底：未分配组的用户默认归入组 1
+                group_id = 1
+            if not engine.check_kb_access(kb_name, group_id):
                 return f"知识库 '{kb_name}' 不属于当前用户组，无权访问。"
 
             result = engine.query(kb_name=kb_name, question=question)

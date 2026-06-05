@@ -319,9 +319,12 @@ function AssistantMessage({
 
   const durationLabel = getThinkingDuration(events, timestamp, isRunning, now);
   const isCancelled = events.some((event) => event.event === "task_cancelled");
+  const isFailed = events.some((event) => event.event === "error");
   const syncLabel = isRunning
     ? `生成中 · 思考 ${durationLabel}`
-    : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
+    : isFailed
+      ? `执行失败 · 用时 ${durationLabel}`
+      : `${isCancelled ? "已取消" : "已同步"} · 用时 ${durationLabel}`;
 
   return (
     <article className="chat-message chat-message--assistant">
@@ -354,6 +357,10 @@ function AssistantMessage({
           <div className="assistant-answer assistant-answer--pending">
             {isRunning ? (
               <ThinkingLoader durationLabel={durationLabel} />
+            ) : isFailed ? (
+              <div className="assistant-answer assistant-answer--error">
+                ⚠️ 任务执行失败，请查看上方执行过程详情
+              </div>
             ) : (
               "任务完成后会在这里显示最终回复。"
             )}
