@@ -64,6 +64,17 @@ ITERATIVE_RETRIEVAL_ENABLED = os.getenv("SELF_RAG_ITERATIVE", "true").lower() !=
 ITERATIVE_MAX_ROUNDS = int(os.getenv("SELF_RAG_ITERATIVE_MAX_ROUNDS", "3"))
 ITERATIVE_SUFFICIENCY_MIN_SCORE = int(os.getenv("SELF_RAG_ITERATIVE_MIN_SCORE", "3"))
 
+# ── Phase 4: Knowledge Graph ──
+KG_ENABLED = os.getenv("SELF_RAG_KG_ENABLED", "false").lower() == "true"
+KG_EXTRACT_MODEL = os.getenv("SELF_RAG_KG_MODEL", settings.LLM_MODEL)
+KG_MAX_ENTITIES_PER_CHUNK = int(os.getenv("SELF_RAG_KG_MAX_ENTITIES", "20"))
+KG_RETRIEVAL_HOPS = int(os.getenv("SELF_RAG_KG_HOPS", "1"))
+KG_FUSION_TOP_K = int(os.getenv("SELF_RAG_KG_FUSION_TOP_K", "5"))
+KG_DATA_DIR = os.getenv(
+    "SELF_RAG_KG_DATA_DIR",
+    str(Path(__file__).resolve().parents[1] / "self_rag_data" / "graph"),
+)
+
 # LLM 配置从统一配置模块读取
 LLM_BASE_URL = settings.LLM_BASE_URL
 LLM_API_KEY = settings.LLM_API_KEY

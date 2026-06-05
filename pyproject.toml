@@ -46,6 +46,7 @@ dependencies = [
     "structlog>=25.5.0",
     "arq>=0.28.0",
     "prometheus-client>=0.25.0",
+    "networkx>=3.6.1",
 ]
 
 [tool.uv]
