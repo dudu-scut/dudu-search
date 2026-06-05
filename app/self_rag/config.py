@@ -51,6 +51,14 @@ RERANK_DEVICE = os.getenv("SELF_RAG_RERANK_DEVICE", "cpu")
 RERANK_TOP_K_INPUT = int(os.getenv("SELF_RAG_RERANK_TOP_K_INPUT", "10"))
 RERANK_TOP_K_OUTPUT = int(os.getenv("SELF_RAG_RERANK_TOP_K_OUTPUT", "4"))
 
+# ── Phase 2: Query Processor ──
+QUERY_EXPANSION_ENABLED = os.getenv("SELF_RAG_QUERY_EXPANSION", "true").lower() != "false"
+QUERY_DECOMPOSITION_ENABLED = os.getenv("SELF_RAG_QUERY_DECOMPOSITION", "false").lower() == "true"
+HYDE_ENABLED = os.getenv("SELF_RAG_HYDE_ENABLED", "false").lower() == "true"
+METADATA_FILTER_ENABLED = os.getenv("SELF_RAG_METADATA_FILTER", "true").lower() != "false"
+QUERY_PROCESSOR_MODEL = os.getenv("SELF_RAG_QUERY_PROCESSOR_MODEL", settings.LLM_MODEL)
+QUERY_PROCESSOR_TIMEOUT = int(os.getenv("SELF_RAG_QUERY_PROCESSOR_TIMEOUT", "5"))
+
 # LLM 配置从统一配置模块读取
 LLM_BASE_URL = settings.LLM_BASE_URL
 LLM_API_KEY = settings.LLM_API_KEY
