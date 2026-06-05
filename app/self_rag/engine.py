@@ -36,6 +36,8 @@ from app.self_rag.config import (
     LLM_BASE_URL,
     LLM_MODEL,
     PARENT_CHUNK_SIZE,
+    RERANK_ENABLED,
+    RERANK_TOP_K_OUTPUT,
     RRF_K,
     TOP_K,
 )
@@ -62,6 +64,9 @@ class RAGEngine:
         self._bm25_indices: dict[str, BM25Okapi] = {}
         self._bm25_doc_ids: dict[str, list[str]] = {}
         self._bm25_metadatas: dict[str, list[dict]] = {}
+
+        # Reranker: lazy-init on first query
+        self._reranker = None
 
     # ---- embedding ----
 
@@ -119,6 +124,16 @@ class RAGEngine:
     def _tokenize(text: str) -> list[str]:
         """jieba 中文分词，用于 BM25 索引和检索。"""
         return list(jieba.cut(text))
+
+    def _get_reranker(self):
+        """Lazy-init the cross-encoder reranker."""
+        if not RERANK_ENABLED:
+            return None
+        if self._reranker is None:
+            from app.self_rag.reranker import Reranker
+
+            self._reranker = Reranker()
+        return self._reranker
 
     # ---- BM25 index management ----
 
@@ -469,8 +484,32 @@ class RAGEngine:
             # BM25 未启用或无结果时，仅用稠密路排序
             merged_parent_ids = sorted(dense_ranks, key=dense_ranks.get)
 
-        # 取融合后的 top_k 个父块
+        # 取融合后的 top_k 个父块（扩取更多候选供 reranker 精排）
         top_parent_ids = merged_parent_ids[:HYBRID_TOP_K]
+
+        # ── Phase 1: Cross-Encoder Reranker ──
+        reranker = self._get_reranker()
+        if reranker is not None and len(top_parent_ids) > 1:
+            parent_collection = self._get_parent_collection(kb_name)
+            if parent_collection:
+                parent_results = parent_collection.get(ids=top_parent_ids)
+                parent_docs = parent_results.get("documents", [])
+                if parent_docs:
+                    candidates = [
+                        {"id": pid, "text": doc, "score": 0.0}
+                        for pid, doc in zip(top_parent_ids, parent_docs)
+                    ]
+                    import asyncio
+
+                    try:
+                        loop = asyncio.get_event_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    reranked = loop.run_until_complete(
+                        reranker.rerank(question, candidates)
+                    )
+                    top_parent_ids = [c["id"] for c in reranked[:RERANK_TOP_K_OUTPUT]]
 
         # --- 回填父块 ---
         parent_collection = self._get_parent_collection(kb_name)
