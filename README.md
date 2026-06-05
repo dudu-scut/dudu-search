@@ -50,7 +50,7 @@
           │
           ├──► 知识库助手 ───► ChromaDB ────► 企业内部文档
           │
-          └──► 数据库助手 ───► MySQL ──────► 业务数据
+          └──► 数据库助手 ───► PostgreSQL ──► 业务数据
 ```
 
 ## 技术栈
@@ -191,12 +191,25 @@ pnpm dev
 | POST | `/api/memories` | 手动创建记忆 |
 | DELETE | `/api/memories/{memory_id}` | 删除记忆 |
 
+### 历史会话查看与继续
+
+前端支持完整的会话历史管理，类似 DeepSeek/ChatGPT 的交互体验：
+
+- **历史会话查看**：点击侧边栏会话即可加载完整对话历史，包含用户问题、执行轨迹和 AI 回答
+- **会话继续问答**：在历史会话中直接输入新问题，自动在原会话 thread 上继续执行
+- **实时事件回放**：切换到历史会话时 WebSocket 自动重连，支持断线重连恢复
+- **状态机管理**：`useDeepAgentSession` hook 统一管理 LIVE ↔ HISTORICAL 状态切换
+  - `loadHistoricalSession(threadId)` — 加载历史会话，切换 threadId 并触发 WS 重连
+  - `clearHistoryView()` — 软切换（清查看标记，保留 threadId 用于继续问答）
+  - `exitHistoryView()` — 硬切换（重置为新会话，创建新 threadId）
+
 ### 新增文件
 
 - `app/storage/__init__.py` - storage 包入口
 - `app/storage/db.py` - PostgreSQL 连接池 + Schema (4表)
 - `app/storage/redis_client.py` - Redis 客户端 + 热状态操作
 - `app/storage/memory_service.py` - 记忆服务：检索/存储/巩固 Pipeline
+- `frontend/src/components/ConversationThread.tsx` - 对话线程（多轮对话渲染）
 - `frontend/src/components/SessionList.tsx` - 历史会话侧边栏列表
 - `frontend/src/components/MemoryPanel.tsx` - Agent 记忆面板
 
@@ -387,6 +400,7 @@ deepsearch-agents/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── ChatComposer.tsx   # 任务输入 + 取消按钮
+│   │   │   ├── ConversationThread.tsx # 对话线程（多轮渲染）
 │   │   │   ├── EventStream.tsx    # 实时事件流 (可筛选)
 │   │   │   ├── SessionList.tsx    # 历史会话侧边栏
 │   │   │   ├── TaskHistory.tsx    # 历史任务表格
@@ -478,7 +492,7 @@ sub_agents:
 
 ### 表结构
 
-系统使用 MySQL 存储业务数据。首次启动时自动执行 `docker/mysql/mysql.sql` 初始化表结构。
+系统使用 PostgreSQL 存储业务数据与向量。表结构由 `app/storage/db.py` 在启动时自动初始化。
 
 ### 安全措施
 
