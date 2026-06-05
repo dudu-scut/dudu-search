@@ -9,6 +9,7 @@
 - 检索：父子文档 + 双路融合 — 小粒度子块做向量检索 + BM25 关键词检索，RRF 融合后回填父块喂 LLM
 """
 
+import asyncio
 import json
 import os
 import uuid
@@ -37,6 +38,7 @@ from app.self_rag.config import (
     LLM_MODEL,
     PARENT_CHUNK_SIZE,
     RERANK_ENABLED,
+    RERANK_TOP_K_INPUT,
     RERANK_TOP_K_OUTPUT,
     RRF_K,
     TOP_K,
@@ -67,6 +69,9 @@ class RAGEngine:
 
         # Reranker: lazy-init on first query
         self._reranker = None
+
+        # QueryProcessor: lazy-init on first query
+        self._query_processor = None
 
     # ---- embedding ----
 
@@ -134,6 +139,40 @@ class RAGEngine:
 
             self._reranker = Reranker()
         return self._reranker
+
+    def _get_query_processor(self):
+        """Lazy-init the query processor. Returns None if all features disabled."""
+        from app.self_rag.config import (
+            HYDE_ENABLED as _HYDE,
+            METADATA_FILTER_ENABLED as _MF,
+            QUERY_DECOMPOSITION_ENABLED as _QD,
+            QUERY_EXPANSION_ENABLED as _QE,
+        )
+        if not any([_QE, _QD, _HYDE, _MF]):
+            return None
+        if self._query_processor is None:
+            from app.self_rag.query_processor import QueryProcessor
+
+            self._query_processor = QueryProcessor()
+        return self._query_processor
+
+    def _hyde_retrieve(self, kb_name: str, hyde_text: str) -> dict[str, int]:
+        """Use HyDE-generated text for dense retrieval, return parent ranks."""
+        collection = self.get_kb(kb_name)
+        if collection is None or not hyde_text:
+            return {}
+
+        hyde_embedding = self._embed([hyde_text])[0]
+        results = collection.query(query_embeddings=[hyde_embedding], n_results=TOP_K)
+        metadatas = results.get("metadatas", [[]])[0]
+
+        ranks: dict[str, int] = {}
+        for rank, meta in enumerate(metadatas):
+            if meta and meta.get("parent_id"):
+                pid = meta["parent_id"]
+                if pid not in ranks:
+                    ranks[pid] = rank
+        return ranks
 
     # ---- BM25 index management ----
 
@@ -451,55 +490,92 @@ class RAGEngine:
         if collection is None:
             return f"知识库 '{kb_name}' 不存在"
 
-        # --- 稠密路：向量检索 ---
-        q_embedding = self._embed([question])[0]
-        dense_results = collection.query(query_embeddings=[q_embedding], n_results=TOP_K)
+        # ── Phase 2: Query Processing ──
+        qp = self._get_query_processor()
+        processed = None
+        if qp is not None:
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            processed = loop.run_until_complete(qp.process(question))
 
-        dense_docs = dense_results.get("documents", [[]])[0]
-        dense_metadatas = dense_results.get("metadatas", [[]])[0]
+        effective_question = processed.expanded if processed else question
+
+        # Run dense + BM25 for each query (main + sub-queries), merge results
+        all_dense_ranks: dict[str, int] = {}
+        all_bm25_ranks: dict[str, int] = {}
+
+        queries_to_run = [effective_question]
+        if processed and processed.sub_queries:
+            queries_to_run.extend(processed.sub_queries)
+
+        for q in queries_to_run:
+            # --- 稠密路 ---
+            q_embedding = self._embed([q])[0]
+            dense_results = collection.query(query_embeddings=[q_embedding], n_results=TOP_K)
+            dense_metadatas = dense_results.get("metadatas", [[]])[0]
+
+            for rank, meta in enumerate(dense_metadatas):
+                if meta and meta.get("parent_id"):
+                    pid = meta["parent_id"]
+                    if pid not in all_dense_ranks:
+                        all_dense_ranks[pid] = rank
+
+            # --- BM25 路 ---
+            if BM25_ENABLED:
+                bm25_results = self._bm25_search(kb_name, q, BM25_TOP_K)
+                for rank, (parent_id, _score) in enumerate(bm25_results):
+                    if parent_id not in all_bm25_ranks:
+                        all_bm25_ranks[parent_id] = rank
+
+        # HyDE: use hypothetical answer for extra dense retrieval
+        if processed and processed.hyde_text:
+            hyde_ranks = self._hyde_retrieve(kb_name, processed.hyde_text)
+            for pid, rank in hyde_ranks.items():
+                if pid not in all_dense_ranks:
+                    all_dense_ranks[pid] = rank
+
+        # Fallback: keep first query's docs/metadatas for empty-result + no-parent-text fallback
+        dense_docs: list[str] = []
+        dense_metadatas: list[dict] = []
+        if queries_to_run:
+            first_embedding = self._embed([queries_to_run[0]])[0]
+            first_results = collection.query(query_embeddings=[first_embedding], n_results=TOP_K)
+            dense_docs = first_results.get("documents", [[]])[0]
+            dense_metadatas = first_results.get("metadatas", [[]])[0]
 
         if not dense_docs and not BM25_ENABLED:
             return "未在知识库中找到相关内容。"
 
-        # 构建稠密路 parent rank（rank 从 0 开始）
-        dense_ranks: dict[str, int] = {}
-        for rank, meta in enumerate(dense_metadatas):
-            if meta and meta.get("parent_id"):
-                pid = meta["parent_id"]
-                if pid not in dense_ranks:
-                    dense_ranks[pid] = rank
-
-        # --- BM25 路：关键词检索 ---
-        bm25_ranks: dict[str, int] = {}
-        if BM25_ENABLED:
-            bm25_results = self._bm25_search(kb_name, question, BM25_TOP_K)
-            for rank, (parent_id, _score) in enumerate(bm25_results):
-                if parent_id not in bm25_ranks:
-                    bm25_ranks[parent_id] = rank
-
         # --- RRF 融合 ---
-        if bm25_ranks:
-            merged_parent_ids = self._rrf_fusion(dense_ranks, bm25_ranks, RRF_K)
+        if all_bm25_ranks:
+            merged_parent_ids = self._rrf_fusion(all_dense_ranks, all_bm25_ranks, RRF_K)
         else:
-            # BM25 未启用或无结果时，仅用稠密路排序
-            merged_parent_ids = sorted(dense_ranks, key=dense_ranks.get)
+            merged_parent_ids = sorted(all_dense_ranks, key=all_dense_ranks.get)
 
-        # 取融合后的 top_k 个父块（扩取更多候选供 reranker 精排）
-        top_parent_ids = merged_parent_ids[:HYBRID_TOP_K]
+        # 扩取候选供 reranker 精排（取 min(RERANK_TOP_K_INPUT, 实际候选数)）
+        reranker_input_count = RERANK_TOP_K_INPUT if RERANK_ENABLED else HYBRID_TOP_K
+        top_parent_ids = merged_parent_ids[:reranker_input_count]
 
         # ── Phase 1: Cross-Encoder Reranker ──
         reranker = self._get_reranker()
+        reranker_doc_map = None
+        reranker_meta_map = None
         if reranker is not None and len(top_parent_ids) > 1:
             parent_collection = self._get_parent_collection(kb_name)
             if parent_collection:
                 parent_results = parent_collection.get(ids=top_parent_ids)
                 parent_docs = parent_results.get("documents", [])
+                parent_metadatas = parent_results.get("metadatas", [])
                 if parent_docs:
+                    reranker_doc_map = dict(zip(top_parent_ids, parent_docs))
+                    reranker_meta_map = dict(zip(top_parent_ids, parent_metadatas))
                     candidates = [
                         {"id": pid, "text": doc, "score": 0.0}
                         for pid, doc in zip(top_parent_ids, parent_docs)
                     ]
-                    import asyncio
 
                     try:
                         loop = asyncio.get_event_loop()
@@ -509,7 +585,7 @@ class RAGEngine:
                     reranked = loop.run_until_complete(
                         reranker.rerank(question, candidates)
                     )
-                    top_parent_ids = [c["id"] for c in reranked[:RERANK_TOP_K_OUTPUT]]
+                    top_parent_ids = [c["id"] for c in reranked]
 
         # --- 回填父块 ---
         parent_collection = self._get_parent_collection(kb_name)
@@ -517,9 +593,13 @@ class RAGEngine:
         sources = []
 
         if parent_collection and top_parent_ids:
-            parent_results = parent_collection.get(ids=top_parent_ids)
-            parent_docs = parent_results.get("documents", [])
-            parent_metadatas = parent_results.get("metadatas", [])
+            if reranker_doc_map is not None:
+                parent_docs = [reranker_doc_map[pid] for pid in top_parent_ids]
+                parent_metadatas = [reranker_meta_map[pid] for pid in top_parent_ids]
+            else:
+                parent_results = parent_collection.get(ids=top_parent_ids)
+                parent_docs = parent_results.get("documents", [])
+                parent_metadatas = parent_results.get("metadatas", [])
             if parent_docs:
                 parent_texts = list(parent_docs)
             for m in parent_metadatas:
