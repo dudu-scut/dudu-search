@@ -44,6 +44,13 @@ HYBRID_TOP_K = int(os.getenv("SELF_RAG_HYBRID_TOP_K", "4"))
 # LLM 关键词提取预留开关（默认关闭）
 KEYWORD_EXTRACTION = os.getenv("SELF_RAG_KEYWORD_EXTRACTION", "false").lower() == "true"
 
+# ── Phase 1: Cross-Encoder Reranker ──
+RERANK_ENABLED = os.getenv("SELF_RAG_RERANK_ENABLED", "true").lower() != "false"
+RERANK_MODEL = os.getenv("SELF_RAG_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+RERANK_DEVICE = os.getenv("SELF_RAG_RERANK_DEVICE", "cpu")
+RERANK_TOP_K_INPUT = int(os.getenv("SELF_RAG_RERANK_TOP_K_INPUT", "10"))
+RERANK_TOP_K_OUTPUT = int(os.getenv("SELF_RAG_RERANK_TOP_K_OUTPUT", "4"))
+
 # LLM 配置从统一配置模块读取
 LLM_BASE_URL = settings.LLM_BASE_URL
 LLM_API_KEY = settings.LLM_API_KEY
