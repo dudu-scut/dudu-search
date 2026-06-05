@@ -21,7 +21,6 @@ import jieba
 from chromadb.config import Settings as ChromaSettings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from openai import OpenAI
-from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
 
 from app.self_rag.config import (
@@ -62,10 +61,8 @@ class RAGEngine:
         )
         self._llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
 
-        # BM25 索引缓存：按知识库名存储，延迟构建
-        self._bm25_indices: dict[str, BM25Okapi] = {}
-        self._bm25_doc_ids: dict[str, list[str]] = {}
-        self._bm25_metadatas: dict[str, list[dict]] = {}
+        # BM25 索引缓存：按知识库名存储 BM25Backend 实例，延迟构建
+        self._bm25_backends: dict[str, "BM25Backend"] = {}
 
         # Reranker: lazy-init on first query
         self._reranker = None
@@ -178,60 +175,45 @@ class RAGEngine:
 
     def _invalidate_bm25(self, kb_name: str) -> None:
         """清除指定 KB 的 BM25 缓存，迫使下次查询时重建。"""
-        self._bm25_indices.pop(kb_name, None)
-        self._bm25_doc_ids.pop(kb_name, None)
-        self._bm25_metadatas.pop(kb_name, None)
+        self._bm25_backends.pop(kb_name, None)
 
-    def _rebuild_bm25(self, kb_name: str) -> None:
-        """从 ChromaDB 子块 collection 重建 BM25 索引。
+    def _get_bm25_backend(self, kb_name: str) -> "BM25Backend":
+        """Get or build the BM25Backend for a knowledge base."""
+        from app.self_rag.search_backend import BM25Backend
 
-        获取所有子块的文本、ID 和元数据，分词后构建 BM25Okapi。
-        BM25 操作的是子块粒度（与稠密检索一致），融合时按 parent_id 聚合。
-        """
+        if kb_name in self._bm25_backends:
+            return self._bm25_backends[kb_name]
+
+        backend = BM25Backend(tokenizer=self._tokenize)
         collection = self.get_kb(kb_name)
-        if collection is None:
-            return
+        if collection is not None:
+            results = collection.get()
+            if results and results.get("documents"):
+                docs = results["documents"]
+                ids = results["ids"]
+                metadatas = results.get("metadatas") or [{} for _ in range(len(docs))]
+                for doc_id, doc_text, meta in zip(ids, docs, metadatas):
+                    backend.add(doc_id, doc_text, meta)
 
-        results = collection.get()
-        if not results or not results.get("documents"):
-            self._bm25_indices[kb_name] = None
-            return
-
-        docs = results["documents"]
-        ids = results["ids"]
-        metadatas = results.get("metadatas") or [{} for _ in range(len(docs))]
-
-        tokenized = [self._tokenize(doc) for doc in docs]
-        self._bm25_indices[kb_name] = BM25Okapi(tokenized)
-        self._bm25_doc_ids[kb_name] = list(ids)
-        self._bm25_metadatas[kb_name] = list(metadatas)
+        self._bm25_backends[kb_name] = backend
+        return backend
 
     def _bm25_search(self, kb_name: str, query: str, top_k: int) -> list[tuple]:
         """BM25 关键词检索。
 
         :return: [(parent_id, bm25_score), ...] 按分数降序排列
         """
-        if kb_name not in self._bm25_indices:
-            self._rebuild_bm25(kb_name)
-
-        index = self._bm25_indices.get(kb_name)
-        if index is None:
+        backend = self._get_bm25_backend(kb_name)
+        if backend.size() == 0:
             return []
 
-        tokenized_query = self._tokenize(query)
-        scores = index.get_scores(tokenized_query)
+        scored_docs = backend.search(query, top_k)
 
-        doc_ids = self._bm25_doc_ids[kb_name]
-        metadatas = self._bm25_metadatas[kb_name]
-
-        # 按分数排序取 top_k，并映射到 parent_id
-        ranked = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+        # Map child doc_ids to parent_ids (dedup by parent_id)
         results = []
         seen_parents = set()
-        for idx, score in ranked:
-            if score <= 0:
-                continue
-            meta = metadatas[idx] if idx < len(metadatas) else {}
+        for doc_id, score in scored_docs:
+            meta = backend.pop_doc_metadata(doc_id)
             parent_id = meta.get("parent_id") if meta else None
             if parent_id and parent_id not in seen_parents:
                 results.append((parent_id, float(score)))

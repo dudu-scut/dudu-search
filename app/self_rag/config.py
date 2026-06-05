@@ -75,6 +75,11 @@ KG_DATA_DIR = os.getenv(
     str(Path(__file__).resolve().parents[1] / "self_rag_data" / "graph"),
 )
 
+# ── Phase 5: Search Backend ──
+BM25_INCREMENTAL_ENABLED = os.getenv("SELF_RAG_BM25_INCREMENTAL", "false").lower() == "true"
+BM25_FULL_REBUILD_THRESHOLD = int(os.getenv("SELF_RAG_BM25_REBUILD_THRESHOLD", "5000"))
+EXTERNAL_SEARCH_BACKEND = os.getenv("SELF_RAG_SEARCH_BACKEND", "bm25")
+
 # LLM 配置从统一配置模块读取
 LLM_BASE_URL = settings.LLM_BASE_URL
 LLM_API_KEY = settings.LLM_API_KEY
