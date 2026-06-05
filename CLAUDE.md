@@ -30,7 +30,7 @@
 deepsearch-agents/
 ├── app/
 │   ├── agent/
-│   │   ├── main_agent.py          # 主智能体: create_deep_agent() + run_deep_agent()
+│   │   ├── main_agent.py          # 主智能体: AsyncPostgresSaver 检查点 + 消息持久化 + LLM 重试
 │   │   ├── llm.py                 # LLM 初始化 (get_llm)
 │   │   ├── prompts.py             # YAML 提示词加载 (load_yaml)
 │   │   └── subagents/
@@ -89,6 +89,7 @@ deepsearch-agents/
 │   ├── src/
 │   │   ├── components/
 │   │   │   ├── ChatComposer.tsx   # 输入框 + 发送/取消按钮 (isRunning 切换图标)
+│   │   │   ├── ConversationThread.tsx # 对话线程（多轮 ChatTurn 渲染，占位符/错误/答案）
 │   │   │   ├── EventStream.tsx    # 实时事件流 + 类型筛选 (Tag.CheckableTag)
 │   │   │   ├── SessionList.tsx    # 历史会话列表 (30s 轮询)
 │   │   │   ├── TaskHistory.tsx    # 历史任务表格 (搜索/筛选/30s 轮询)
@@ -96,7 +97,7 @@ deepsearch-agents/
 │   │   │   ├── LoginPage.tsx      # 登录/注册 (表单验证, token 存储)
 │   │   │   └── MemoryPanel.tsx
 │   │   ├── hooks/
-│   │   │   └── useDeepAgentSession.ts  # WebSocket + 状态管理 (15s/30s 轮询)
+│   │   │   └── useDeepAgentSession.ts  # WebSocket + 会话状态机 (LIVE↔HISTORICAL, 120 事件上限)
 │   │   ├── lib/
 │   │   │   ├── api.ts             # REST API 函数 (startTask/cancelTask/listSessions/...)
 │   │   │   └── auth.ts            # 前端认证 (getUser/logout/authFetch)
@@ -265,6 +266,14 @@ docker compose -f docker-compose.prod.yaml up -d
 - **monitor 多通道推送**: `_emit()` → WebSocket + Redis 缓存 + 控制台
 - **mock 优先测试**: 所有外部依赖通过 Mock 隔离，不连真实服务
 - **`.env` 不入库**: API 密钥等敏感信息通过 Pydantic BaseSettings 从环境变量读取
+- **历史会话状态机**: `useDeepAgentSession` 管理 LIVE/HISTORICAL 状态切换
+  - `loadHistoricalSession(id)` → 设置 threadId + 加载事件 + WS 重连 + 构建 ChatTurn
+  - `clearHistoryView()` → 软切换：清除查看标记，保留 threadId/events（用于继续问答）
+  - `exitHistoryView()` → 硬切换：resetSession() 创建新 threadId（"新建研搜"按钮）
+  - ChatComposer 始终可见，`isViewingHistory` 控制顶部横幅 + useEffect 事件同步守卫
+- **ChatTurn 构建**: 历史会话从 `detail.messages` 按 user/assistant 对映射为 ChatTurn[]
+  - 最后一条 turn 绑定 `historyEvents`，其余 turn 使用空 events[]
+  - `return { detail, historyEvents }` 避免 React setState 异步导致的值滞后
 
 ## 注意事项
 
