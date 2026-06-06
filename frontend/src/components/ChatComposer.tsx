@@ -1,4 +1,5 @@
 import {
+  CloseOutlined,
   PaperClipOutlined,
   PlusOutlined,
   SendOutlined,
@@ -15,6 +16,7 @@ interface ChatComposerProps {
   onNewSession: () => void;
   onCancel: () => void;
   onQueryChange: (value: string) => void;
+  onRemoveFile: (itemName: string) => void;
   onSubmit: () => void;
   onUpload: (items: UploadedItem[]) => Promise<void> | void;
   query: string;
@@ -54,6 +56,7 @@ export function ChatComposer({
   onCancel,
   onNewSession,
   onQueryChange,
+  onRemoveFile,
   onStagedItemsChange,
   onSubmit,
   onUpload,
@@ -89,6 +92,17 @@ export function ChatComposer({
             <span className="attachment-pill" key={`${item.uid}-${item.name}`}>
               <PaperClipOutlined aria-hidden />
               {item.name}
+              <button
+                aria-label={`删除 ${item.name}`}
+                className="attachment-pill-remove"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onRemoveFile(item.name);
+                }}
+                type="button"
+              >
+                <CloseOutlined />
+              </button>
             </span>
           ))}
         </div>

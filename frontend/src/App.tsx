@@ -151,6 +151,15 @@ function AuthenticatedApp() {
     }
   }
 
+  async function handleRemoveFile(itemName: string) {
+    try {
+      await session.removeUploadedFile(itemName);
+      message.success(`已删除 ${itemName}`);
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "删除文件失败");
+    }
+  }
+
   function handleNewSession() {
     if (session.isViewingHistory) {
       session.exitHistoryView();
@@ -392,6 +401,7 @@ function AuthenticatedApp() {
           onCancel={handleCancel}
           onNewSession={handleNewSession}
           onQueryChange={setQuery}
+          onRemoveFile={handleRemoveFile}
           onStagedItemsChange={setStagedItems}
           onSubmit={handleSubmit}
           onUpload={handleUpload}

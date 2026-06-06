@@ -686,6 +686,56 @@ async def upload_files(
     return {"status": "uploaded", "files": saved_files}
 
 
+@app.delete("/api/upload/{thread_id}/{filename}")
+async def delete_uploaded_file(
+    thread_id: str,
+    filename: str,
+    user: UserInfo = Depends(get_current_user),
+):
+    """
+    删除已上传文件接口 (Delete Uploaded File)。
+
+    目标：
+    1. 删除指定会话的上传文件。
+    2. 严格的安全检查，防止路径遍历攻击。
+
+    Args:
+        thread_id (str): 会话 ID。
+        filename (str): 要删除的文件名。
+    """
+    # 防御路径穿越
+    safe_filename = Path(filename).name
+    if safe_filename != filename:
+        raise ValidationError("文件名包含非法路径字符")
+    if not safe_filename or safe_filename in (".", ".."):
+        raise ValidationError("无效的文件名")
+
+    target_dir = updated_dir / f"session_{thread_id}"
+    file_path = target_dir / safe_filename
+
+    if not file_path.exists():
+        raise DeepAgentsError(f"文件不存在: {safe_filename}")
+
+    if not file_path.is_relative_to(target_dir.resolve()):
+        raise PermissionDeniedError("拒绝访问: 文件路径越权")
+
+    try:
+        file_path.unlink()
+        logger.info("已删除上传文件", thread_id=thread_id, filename=safe_filename)
+    except OSError as e:
+        raise DeepAgentsError(f"删除文件失败: {e}")
+
+    # 如果目录为空，清理目录
+    try:
+        remaining = list(target_dir.iterdir())
+        if not remaining:
+            target_dir.rmdir()
+    except OSError:
+        pass
+
+    return {"status": "deleted", "filename": safe_filename}
+
+
 @app.get("/api/download")
 async def download_file(
     path: str,

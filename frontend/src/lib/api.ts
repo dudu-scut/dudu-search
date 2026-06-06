@@ -66,6 +66,16 @@ export async function uploadSessionFiles(
   });
 }
 
+export async function deleteUploadedFile(
+  threadId: string,
+  filename: string
+): Promise<{ status: string; filename: string }> {
+  return requestJson(
+    apiUrl(`/api/upload/${encodeURIComponent(threadId)}/${encodeURIComponent(filename)}`),
+    { method: "DELETE" }
+  );
+}
+
 export async function listSessionFiles(path: string): Promise<FileListResponse> {
   const url = new URL(apiUrl("/api/files"));
   url.searchParams.set("path", path);

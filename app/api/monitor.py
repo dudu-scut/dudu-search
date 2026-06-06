@@ -228,10 +228,10 @@ async def _persist_events_batch(batch: list[tuple[str, dict]]) -> None:
         async with pool.acquire() as conn:
             values_parts = []
             params = []
-            for i, (thread_id, payload) in enumerate(batch):
+            for thread_id, payload in batch:
                 if not thread_id:
                     continue
-                offset = i * 4
+                offset = len(params)  # 基于已添加参数的实际位置
                 values_parts.append(
                     f"(${offset+1}, ${offset+2}, ${offset+3}, ${offset+4})"
                 )

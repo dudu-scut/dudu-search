@@ -1713,6 +1713,30 @@ textarea {
   color: #78350f;
 }
 
+.attachment-pill-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #166534;
+  cursor: pointer;
+  font-size: 10px;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+  line-height: 1;
+  padding: 0;
+  margin-left: auto;
+}
+
+.attachment-pill-remove:hover {
+  background: rgba(239, 68, 68, 0.18);
+  color: #dc2626;
+}
+
 .attachment-uploading {
   display: inline-flex;
   align-items: center;
