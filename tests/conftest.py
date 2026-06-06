@@ -51,24 +51,31 @@ def mock_db_pool():
 
 @pytest.fixture
 def mock_redis():
-    """Mock Redis 客户端 — 替代真实的 Redis 连接。"""
-    with patch("app.storage.redis_client.get_redis") as mock_get:
-        mock_client = AsyncMock()
-        mock_client.ping = AsyncMock(return_value=True)
-        mock_client.get = AsyncMock(return_value=None)
-        mock_client.set = AsyncMock(return_value=True)
-        mock_client.delete = AsyncMock(return_value=1)
-        mock_client.incr = AsyncMock(return_value=1)
-        mock_client.decr = AsyncMock(return_value=0)
-        mock_client.expire = AsyncMock(return_value=True)
-        mock_client.lpush = AsyncMock(return_value=1)
-        mock_client.lrange = AsyncMock(return_value=[])
-        mock_client.ltrim = AsyncMock(return_value=True)
-        mock_client.zadd = AsyncMock(return_value=1)
-        mock_client.zcard = AsyncMock(return_value=0)
-        mock_client.zremrangebyscore = AsyncMock(return_value=0)
-        mock_client.pipeline.return_value = mock_client
-        mock_get.return_value = mock_client
+    """Mock Redis 客户端 — 替代真实的 Redis 连接。
+
+    注意：server.py 以 ``from app.storage.redis_client import get_redis``
+    形式导入，必须额外 patch app.api.server.get_redis。
+    """
+    mock_client = AsyncMock()
+    mock_client.ping = AsyncMock(return_value=True)
+    mock_client.get = AsyncMock(return_value=None)
+    mock_client.set = AsyncMock(return_value=True)
+    mock_client.delete = AsyncMock(return_value=1)
+    mock_client.incr = AsyncMock(return_value=1)
+    mock_client.decr = AsyncMock(return_value=0)
+    mock_client.expire = AsyncMock(return_value=True)
+    mock_client.lpush = AsyncMock(return_value=1)
+    mock_client.lrange = AsyncMock(return_value=[])
+    mock_client.ltrim = AsyncMock(return_value=True)
+    mock_client.zadd = AsyncMock(return_value=1)
+    mock_client.zcard = AsyncMock(return_value=0)
+    mock_client.zremrangebyscore = AsyncMock(return_value=0)
+    mock_client.pipeline.return_value = mock_client
+
+    with (
+        patch("app.storage.redis_client.get_redis", return_value=mock_client),
+        patch("app.api.server.get_redis", return_value=mock_client),
+    ):
         yield mock_client
 
 
@@ -110,7 +117,10 @@ def mock_limiter():
             pass
 
     with patch("slowapi.Limiter", NoopLimiter), \
-         patch.object(slowapi_ext, "Limiter", NoopLimiter):
+         patch.object(slowapi_ext, "Limiter", NoopLimiter), \
+         patch("app.api.server.limiter.limit", lambda *a, **kw: lambda f: f), \
+         patch("app.api.server.limiter.shared_limit", lambda *a, **kw: lambda f: f), \
+         patch("app.api.server.limiter.enabled", False):
         yield
 
 
@@ -175,6 +185,33 @@ def admin_headers():
         group_id=1,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+def mock_ldap_client():
+    """Mock LDAP 客户端 — 模拟 LDAP bind 成功/失败。
+
+    注意：LDAPClient 在 server.py 中以 ``from app.auth.ldap_client import LDAPClient``
+    形式导入，因此必须 patch ``app.api.server.LDAPClient``。
+    """
+    with patch("app.api.server.LDAPClient") as mock:
+        mock.is_enabled.return_value = True
+        mock.authenticate.return_value = None  # 默认失败
+        yield mock
+
+
+@pytest.fixture
+def mock_oidc_client():
+    """Mock OIDC 客户端 — 模拟 OIDC authorize/exchange。
+
+    OIDCClient 方法是 async classmethod，因此 mock 的 classmethod 必须也返回 coroutine。
+    """
+    with patch("app.api.server.OIDCClient") as mock:
+        mock.is_enabled.return_value = True
+        mock.generate_state.return_value = "test-state-abc"
+        mock.get_authorize_url = AsyncMock(return_value="https://idp.example.com/authorize?state=test-state-abc")
+        mock.exchange_code = AsyncMock(return_value=None)
+        yield mock
 
 
 @pytest.fixture
