@@ -40,12 +40,11 @@ class LDAPClient:
             return None
 
         try:
-            from ldap3 import Server, Connection, ALL, Tls
+            from ldap3 import Server, Connection, Tls
 
             use_tls = settings.LDAP_USE_TLS
             server = Server(
                 settings.LDAP_URL,
-                get_info=ALL,
                 connect_timeout=5,
                 tls=Tls() if use_tls else None,
             )
@@ -60,39 +59,38 @@ class LDAPClient:
                 receive_timeout=5,
             )
 
-            if not conn.bind():
-                logger.info("LDAP bind failed", username=username)
+            try:
+                if not conn.bind():
+                    logger.info("LDAP bind failed", username=username)
+                    return None
+
+                # Bind 成功，搜索用户属性
+                email = None
+                display_name = None
+                if settings.LDAP_EMAIL_ATTR or settings.LDAP_USERNAME_ATTR:
+                    search_dn = (
+                        f"{settings.LDAP_USER_RDN},{settings.LDAP_BASE_DN}"
+                        if settings.LDAP_USER_RDN
+                        else settings.LDAP_BASE_DN
+                    )
+                    attrs = [settings.LDAP_EMAIL_ATTR] if settings.LDAP_EMAIL_ATTR else []
+                    if conn.search(
+                        search_base=search_dn,
+                        search_filter=f"({settings.LDAP_USERNAME_ATTR}={username})",
+                        attributes=attrs,
+                        size_limit=1,
+                        time_limit=3,
+                    ):
+                        for entry in conn.entries:
+                            email_val = getattr(entry, settings.LDAP_EMAIL_ATTR, None)
+                            if email_val:
+                                email = str(email_val)
+
+                logger.info("LDAP authenticate success", username=username, email=email)
+                return LDAPUser(username=username, email=email, display_name=display_name)
+
+            finally:
                 conn.unbind()
-                return None
-
-            # Bind 成功，搜索用户属性
-            email = None
-            display_name = None
-            if settings.LDAP_EMAIL_ATTR or settings.LDAP_USERNAME_ATTR:
-                search_dn = (
-                    f"{settings.LDAP_USER_RDN},{settings.LDAP_BASE_DN}"
-                    if settings.LDAP_USER_RDN
-                    else settings.LDAP_BASE_DN
-                )
-                attrs = [settings.LDAP_EMAIL_ATTR] if settings.LDAP_EMAIL_ATTR else []
-                if conn.search(
-                    search_base=search_dn,
-                    search_filter=f"({settings.LDAP_USERNAME_ATTR}={username})",
-                    attributes=attrs,
-                    size_limit=1,
-                    time_limit=3,
-                ):
-                    for entry in conn.entries:
-                        email_val = getattr(entry, settings.LDAP_EMAIL_ATTR, None)
-                        if email_val:
-                            email = str(email_val)
-                        display_name_val = getattr(entry, "displayName", None)
-                        if display_name_val:
-                            display_name = str(display_name_val)
-
-            conn.unbind()
-            logger.info("LDAP authenticate success", username=username, email=email)
-            return LDAPUser(username=username, email=email, display_name=display_name)
 
         except Exception as exc:
             logger.warning("LDAP authenticate error", username=username, error=str(exc))
