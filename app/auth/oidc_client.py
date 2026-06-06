@@ -1,13 +1,11 @@
 """OIDC 认证客户端 — Discovery, Authorization URL 构建, Code 换 Token。"""
 
-import hashlib
 import secrets
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
-import jwt as pyjwt
 
 from app.config import settings
 from app.logging_config import get_logger
@@ -74,12 +72,11 @@ class OIDCClient:
         """
         用授权码换取用户信息。
 
-        1. POST token endpoint -> id_token + access_token
-        2. 验证 id_token (iss, aud, exp)
-        3. GET userinfo endpoint -> OIDCUser
+        1. POST token endpoint → access_token
+        2. GET userinfo endpoint (Bearer) → OIDCUser
+        3. 失败返回 None
         """
         config = await cls._get_config()
-        issuer = config["_issuer"]
 
         # Exchange code for tokens
         token_resp = await cls._http.post(
@@ -97,23 +94,11 @@ class OIDCClient:
             return None
 
         tokens = token_resp.json()
-        id_token = tokens.get("id_token")
         access_token = tokens.get("access_token")
 
         if not access_token:
             logger.warning("OIDC no access_token in response")
             return None
-
-        # Validate id_token if present
-        if id_token:
-            try:
-                # Decode without verification first to get issuer's key
-                unverified = pyjwt.decode(id_token, options={"verify_signature": False})
-                if unverified.get("iss") != issuer:
-                    logger.warning("OIDC id_token iss mismatch", iss=unverified.get("iss"))
-                    return None
-            except Exception:
-                pass
 
         # Fetch userinfo
         userinfo_resp = await cls._http.get(
