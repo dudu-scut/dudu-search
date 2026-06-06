@@ -7,6 +7,7 @@ session_id 创建独立工作目录，并把工具调用、子智能体调用和
 """
 
 import asyncio
+import os
 import shutil
 import sys
 from datetime import datetime, timezone, timedelta
@@ -312,8 +313,14 @@ async def run_deep_agent(task_query, session_id, group_id=None):
         files = [f.name for f in updated_dir_path.iterdir() if f.is_file()]
         if files:
             for filename in files:
-                # copy2 会保留上传文件的修改时间、权限等元数据，便于后续排查文件来源
-                shutil.copy2(updated_dir_path / filename, session_dir / filename)
+                src = updated_dir_path / filename
+                dst = session_dir / filename
+                try:
+                    # 同文件系统内硬链接，O(1) 操作，无数据复制
+                    os.link(src, dst)
+                except OSError:
+                    # 跨文件系统回退到物理复制
+                    shutil.copy2(src, dst)
 
             # 把上传文件列表注入用户消息，提醒模型先调用 read_file_content 获取附件内容
             updated_info_prompt = (
