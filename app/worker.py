@@ -20,6 +20,8 @@ async def startup(ctx):
 
 async def shutdown(ctx):
     """Worker 关闭时清理资源。"""
+    from app.agent.main_agent import close_checkpointer
+    await close_checkpointer()
     logger.info("Worker 关闭")
 
 

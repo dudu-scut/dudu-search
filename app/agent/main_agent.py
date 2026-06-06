@@ -13,6 +13,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import httpx
+from typing import Any
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from deepagents import create_deep_agent
@@ -40,8 +41,6 @@ logger = get_logger("main_agent")
 
 # ── Checkpointer 连接池单例 ──
 # 所有任务共享同一个 AsyncPostgresSaver，避免每次任务都重新建连+跑 migration
-from typing import Any
-
 _checkpointer: AsyncPostgresSaver | None = None
 _checkpointer_cm: Any = None  # 保留 context manager 引用用于清理
 _checkpointer_lock = asyncio.Lock()
@@ -64,8 +63,14 @@ async def get_checkpointer() -> AsyncPostgresSaver:
         postgres_uri = settings.POSTGRES_SYNC_URI
         _checkpointer_cm = AsyncPostgresSaver.from_conn_string(postgres_uri)
         # 手动进入 async context manager，保持连接池存活
-        _checkpointer = await _checkpointer_cm.__aenter__()
-        await _checkpointer.setup()
+        try:
+            _checkpointer = await _checkpointer_cm.__aenter__()
+            await _checkpointer.setup()
+        except Exception:
+            # 初始化失败时重置状态，允许后续调用重试
+            _checkpointer = None
+            _checkpointer_cm = None
+            raise
         logger.info("Checkpointer 单例已初始化")
         return _checkpointer
 
@@ -77,7 +82,7 @@ async def close_checkpointer() -> None:
         try:
             await _checkpointer_cm.__aexit__(None, None, None)
         except Exception:
-            pass
+            logger.warning("Checkpointer 关闭异常", exc_info=True)
         _checkpointer_cm = None
         _checkpointer = None
         logger.info("Checkpointer 单例已清理")
