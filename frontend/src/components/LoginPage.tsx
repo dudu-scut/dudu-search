@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Card, Form, Input, Button, Tabs, message } from "antd";
-import { UserOutlined, LockOutlined } from "@ant-design/icons";
+import { UserOutlined, LockOutlined, KeyOutlined } from "@ant-design/icons";
 import { setToken, setUser } from "../lib/auth";
 
 interface LoginPageProps {
@@ -10,6 +10,14 @@ interface LoginPageProps {
 const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   const [loading, setLoading] = useState(false);
   const [activeTab, setActiveTab] = useState<"login" | "register">("login");
+  const [providers, setProviders] = useState<string[]>([]);
+
+  useEffect(() => {
+    fetch("/api/auth/sso/providers")
+      .then((r) => r.json())
+      .then((d) => setProviders(d.providers || []))
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async (values: {
     username: string;
@@ -96,6 +104,33 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
             </Button>
           </Form.Item>
         </Form>
+          {providers.length > 0 && (
+            <>
+              <div
+                style={{
+                  textAlign: "center",
+                  margin: "16px 0",
+                  color: "#999",
+                  fontSize: 13,
+                }}
+              >
+                ── 其他登录方式 ──
+              </div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 12 }}>
+                {providers.map((p) => (
+                  <Button
+                    key={p}
+                    icon={<KeyOutlined />}
+                    onClick={() => {
+                      window.location.href = "/api/auth/sso/login";
+                    }}
+                  >
+                    OIDC SSO
+                  </Button>
+                ))}
+              </div>
+            </>
+          )}
       </Card>
     </div>
   );

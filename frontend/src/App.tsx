@@ -21,7 +21,7 @@ import SessionList from "./components/SessionList";
 import TaskHistory from "./components/TaskHistory";
 import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
-import { getUser, isLoggedIn, logout } from "./lib/auth";
+import { getUser, isLoggedIn, logout, handleSSOCallback } from "./lib/auth";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
 import type { ConnectionState, UploadedItem } from "./types";
 
@@ -415,7 +415,10 @@ function AuthenticatedApp() {
 }
 
 export default function App() {
-  const [loggedIn, setLoggedIn] = useState(isLoggedIn());
+  const [loggedIn, setLoggedIn] = useState(() => {
+    if (handleSSOCallback()) return true;
+    return isLoggedIn();
+  });
 
   if (!loggedIn) {
     return <LoginPage onLoginSuccess={() => setLoggedIn(true)} />;

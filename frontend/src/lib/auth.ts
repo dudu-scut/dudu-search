@@ -46,6 +46,32 @@ export function logout(): void {
   window.location.href = "/";
 }
 
+/** Handle OIDC SSO callback — extract token from URL hash fragment and store it. */
+export function handleSSOCallback(): boolean {
+  const hash = window.location.hash;
+  if (hash.startsWith("#token=")) {
+    const token = hash.substring("#token=".length);
+    // Parse JWT payload to get user info
+    try {
+      const payload = JSON.parse(atob(token.split(".")[1]));
+      setToken(token);
+      setUser({
+        id: payload.sub,
+        username: payload.username,
+        role: payload.role,
+        group_id: payload.group_id,
+      });
+    } catch {
+      // If parsing fails, still store the token
+      setToken(token);
+    }
+    // Clean URL (remove hash fragment)
+    window.location.hash = "";
+    return true;
+  }
+  return false;
+}
+
 export function authHeaders(): Record<string, string> {
   const token = getToken();
   if (!token) return {};
