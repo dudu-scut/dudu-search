@@ -440,6 +440,9 @@ async def run_deep_agent(task_query, session_id, group_id=None):
         )
         raise  # 重新抛出，让 Worker 将会话标记为 failed
     finally:
+        # 确保所有缓冲事件已持久化
+        from app.api.monitor import flush_batch
+        await flush_batch()
         # 标记会话完成（仅在正常完成时；异常/取消时 Worker 会覆盖状态）
         if sys.exc_info()[0] is None:
             asyncio.create_task(_complete_session(session_id))

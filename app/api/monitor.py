@@ -76,43 +76,10 @@ class ToolMonitor:
             except Exception:
                 pass
 
-        # 写入 Redis 缓存（fire-and-forget，便于断线重连恢复）
-        # 同时发布到 Redis Pub/Sub 频道，让 Server 进程转发到 WebSocket
+        # 微批处理：将 Redis 缓存 + PubSub + PostgreSQL 持久化合并为批量操作
         thread_id = get_thread_context()
         if thread_id:
-            try:
-                from app.storage.redis_client import cache_event, publish_ws_event
-                import json as _json
-                import asyncio as _asyncio
-
-                async def _cache_and_publish():
-                    try:
-                        await cache_event(thread_id, payload)
-                        pub_msg = _json.dumps(
-                            {"type": "monitor_event", "event": event_type, "message": message,
-                             "data": data or {}, "timestamp": payload["timestamp"]},
-                            ensure_ascii=False, default=str,
-                        )
-                        await publish_ws_event(thread_id, pub_msg)
-                        logger.debug("事件已缓存并发布", thread_id=thread_id, event_type=event_type)
-                    except Exception as e:
-                        logger.warning("事件缓存/发布失败", thread_id=thread_id, error=str(e))
-
-                _asyncio.ensure_future(_cache_and_publish())
-            except Exception:
-                pass
-
-        # 持久化事件到 PostgreSQL（fire-and-forget，不阻塞主流程）
-        try:
-            import asyncio as _asyncio
-            _asyncio.ensure_future(_persist_monitor_event(
-                thread_id=thread_id,
-                event_type=event_type,
-                message=message,
-                payload=data or {},
-            ))
-        except Exception:
-            pass
+            _enqueue_batch(thread_id, payload)
 
         # 控制台保底输出，便于无前端场景下观察执行过程
         logger.info(message, event_type=event_type)
@@ -212,6 +179,99 @@ class ToolMonitor:
 
 
 monitor = ToolMonitor()
+
+# ── 微批处理缓冲区 ──
+# 50ms 内的事件合并为一次批量推送，减少 Redis/PG 操作
+_batch_buffer: list[tuple[str, dict]] = []
+_batch_flush_task: asyncio.Task | None = None
+
+
+async def _flush_batch() -> None:
+    """将缓冲区中的事件批量写入 Redis 和 PostgreSQL。"""
+    global _batch_buffer
+    if not _batch_buffer:
+        return
+    batch = _batch_buffer
+    _batch_buffer = []
+
+    try:
+        from app.storage.redis_client import cache_event, publish_ws_event
+        import json as _json
+
+        for thread_id, payload in batch:
+            try:
+                await cache_event(thread_id, payload)
+                pub_msg = _json.dumps(
+                    {"type": payload["type"], "event": payload["event"],
+                     "message": payload["message"], "data": payload["data"],
+                     "timestamp": payload["timestamp"]},
+                    ensure_ascii=False, default=str,
+                )
+                await publish_ws_event(thread_id, pub_msg)
+            except Exception as e:
+                logger.warning("批量事件推送失败", error=str(e))
+    except Exception:
+        pass
+
+    # 批量持久化到 PostgreSQL
+    await _persist_events_batch(batch)
+
+
+async def _persist_events_batch(batch: list[tuple[str, dict]]) -> None:
+    """批量持久化事件到 PostgreSQL（单条 INSERT）。"""
+    if not batch:
+        return
+    try:
+        import json
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            values_parts = []
+            params = []
+            for i, (thread_id, payload) in enumerate(batch):
+                if not thread_id:
+                    continue
+                offset = i * 4
+                values_parts.append(
+                    f"(${offset+1}, ${offset+2}, ${offset+3}, ${offset+4})"
+                )
+                params.extend([
+                    thread_id,
+                    payload["event"],
+                    payload["message"],
+                    json.dumps(payload["data"], ensure_ascii=False),
+                ])
+            if values_parts:
+                await conn.execute(
+                    f"INSERT INTO agent_events (thread_id, event_type, message, payload) "
+                    f"VALUES {', '.join(values_parts)}",
+                    *params,
+                )
+    except Exception as e:
+        logger.warning("批量事件持久化失败", exc_info=True)
+
+
+def _enqueue_batch(thread_id: str, payload: dict) -> None:
+    """将事件加入微批缓冲区，50ms 后自动刷新。"""
+    global _batch_buffer, _batch_flush_task
+    _batch_buffer.append((thread_id, payload))
+    if _batch_flush_task is None or _batch_flush_task.done():
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        _batch_flush_task = loop.create_task(_flush_batch_after(0.05))
+
+
+async def _flush_batch_after(delay: float) -> None:
+    """延迟后批量刷新缓冲区。"""
+    await asyncio.sleep(delay)
+    await _flush_batch()
+
+
+async def flush_batch() -> None:
+    """立即刷新微批缓冲区（任务完成时调用）。"""
+    await _flush_batch()
 
 
 class ConnectionManager:
