@@ -11,6 +11,7 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import shutil
 import time
 import uuid
@@ -34,7 +35,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -47,6 +48,8 @@ from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
 from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, require_admin
 from app.auth.jwt import create_access_token, decode_token, hash_password, verify_password
+from app.auth.ldap_client import LDAPClient
+from app.auth.oidc_client import OIDCClient
 from app.config import settings
 from app.exceptions import AuthError, DeepAgentsError, PermissionDeniedError, ValidationError
 from app.logging_config import get_logger, setup_logging
@@ -380,7 +383,13 @@ async def register(request: Request):
 @app.post("/api/auth/login")
 @limiter.limit("5/minute")
 async def login(request: Request):
-    """用户登录（限流：每 IP 每分钟 5 次）。"""
+    """用户登录（限流：每 IP 每分钟 5 次）。
+
+    认证顺序：
+    1. 查本地用户表 → bcrypt 验证 → 返回 JWT
+    2. 未找到 + LDAP 已启用 → LDAP bind → 自动创建用户 → 返回 JWT
+    3. 均失败 → 401
+    """
     body = await request.json()
     username = (body.get("username") or "").strip()
     password = body.get("password") or ""
@@ -398,29 +407,157 @@ async def login(request: Request):
             username,
         )
 
-    if row is None:
-        raise AuthError("用户名或密码错误")
-    if not row["is_active"]:
-        raise AuthError("账户已被禁用")
+    # ── 路径 1: 本地用户 ──
+    if row is not None:
+        if not row["is_active"]:
+            raise AuthError("账户已被禁用")
+        if not verify_password(password, row["password_hash"]):
+            raise AuthError("用户名或密码错误")
+        token = create_access_token(
+            user_id=row["id"],
+            username=row["username"],
+            role=row["role"],
+            group_id=row["group_id"],
+        )
+        return {
+            "token": token,
+            "user": {
+                "id": row["id"],
+                "username": row["username"],
+                "role": row["role"],
+                "group_id": row["group_id"],
+            },
+        }
 
-    if not verify_password(password, row["password_hash"]):
-        raise AuthError("用户名或密码错误")
+    # ── 路径 2: LDAP fallback ──
+    if LDAPClient.is_enabled():
+        ldap_user = LDAPClient.authenticate(username, password)
+        if ldap_user is not None:
+            async with pool.acquire() as conn:
+                existing = await conn.fetchrow(
+                    "SELECT id::text, username, role, group_id, is_active "
+                    "FROM users WHERE username = $1",
+                    username,
+                )
+                if existing is not None:
+                    if not existing["is_active"]:
+                        raise AuthError("账户已被禁用")
+                    token = create_access_token(
+                        user_id=existing["id"],
+                        username=existing["username"],
+                        role=existing["role"],
+                        group_id=existing["group_id"],
+                    )
+                    return {
+                        "token": token,
+                        "user": {
+                            "id": existing["id"],
+                            "username": existing["username"],
+                            "role": existing["role"],
+                            "group_id": existing["group_id"],
+                        },
+                    }
 
-    token = create_access_token(
-        user_id=row["id"],
-        username=row["username"],
-        role=row["role"],
-        group_id=row["group_id"],
-    )
-    return {
-        "token": token,
-        "user": {
-            "id": row["id"],
-            "username": row["username"],
-            "role": row["role"],
-            "group_id": row["group_id"],
-        },
-    }
+                user_id = await conn.fetchval(
+                    """
+                    INSERT INTO users (username, password_hash, email, group_id, role, auth_source)
+                    VALUES ($1, $2, $3, 1, 'user', 'ldap')
+                    RETURNING id::text
+                    """,
+                    username,
+                    hash_password(secrets.token_urlsafe(32)),
+                    ldap_user.email or "",
+                )
+
+            token = create_access_token(
+                user_id=user_id, username=username, role="user", group_id=1
+            )
+            return {
+                "token": token,
+                "user": {"id": user_id, "username": username, "role": "user", "group_id": 1},
+            }
+
+    raise AuthError("用户名或密码错误")
+
+
+@app.get("/api/auth/sso/login")
+async def sso_login():
+    """OIDC SSO 登录入口 — 重定向到身份提供者。"""
+    if not OIDCClient.is_enabled():
+        raise HTTPException(status_code=404, detail="SSO not configured")
+
+    state = OIDCClient.generate_state()
+    nonce = secrets.token_urlsafe(16)
+
+    redis = await get_redis()
+    await redis.set(f"sso:state:{state}", nonce, ex=300)
+
+    auth_url = await OIDCClient.get_authorize_url(state)
+    return RedirectResponse(url=auth_url, status_code=302)
+
+
+@app.get("/api/auth/sso/callback")
+async def sso_callback(code: str, state: str):
+    """OIDC SSO 回调 — 验证 state、换 token、创建/匹配用户、返回 JWT。"""
+    if not OIDCClient.is_enabled():
+        raise HTTPException(status_code=404, detail="SSO not configured")
+
+    redis = await get_redis()
+    stored_nonce = await redis.get(f"sso:state:{state}")
+    if stored_nonce is None:
+        raise AuthError("SSO state 无效或已过期")
+    await redis.delete(f"sso:state:{state}")
+
+    oidc_user = await OIDCClient.exchange_code(code)
+    if oidc_user is None:
+        raise AuthError("SSO 认证失败，无法获取用户信息")
+
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id::text, username, role, group_id, is_active "
+            "FROM users WHERE username = $1",
+            oidc_user.username,
+        )
+
+        if row is not None:
+            if not row["is_active"]:
+                raise AuthError("账户已被禁用")
+            token = create_access_token(
+                user_id=row["id"],
+                username=row["username"],
+                role=row["role"],
+                group_id=row["group_id"],
+            )
+        else:
+            user_id = await conn.fetchval(
+                """
+                INSERT INTO users (username, password_hash, email, group_id, role, auth_source)
+                VALUES ($1, $2, $3, 1, 'user', 'oidc')
+                RETURNING id::text
+                """,
+                oidc_user.username,
+                hash_password(secrets.token_urlsafe(32)),
+                oidc_user.email or "",
+            )
+            token = create_access_token(
+                user_id=user_id, username=oidc_user.username, role="user", group_id=1
+            )
+
+    frontend_origin = settings.CORS_ORIGINS.split(",")[0].strip()
+    redirect_url = f"{frontend_origin}/?token={token}"
+    return RedirectResponse(url=redirect_url, status_code=302)
+
+
+@app.get("/api/auth/sso/providers")
+async def sso_providers():
+    """返回已启用的 SSO provider 列表。"""
+    providers = []
+    if OIDCClient.is_enabled():
+        providers.append("oidc")
+    return {"providers": providers}
 
 
 @app.get("/api/auth/me")
