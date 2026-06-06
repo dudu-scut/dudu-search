@@ -91,6 +91,20 @@ class Settings(BaseSettings):
     JWT_SECRET: str = "change-me-in-production"
     JWT_EXPIRE_HOURS: int = 24
 
+    # ── LDAP（空字符串表示未启用）──
+    LDAP_URL: str = ""
+    LDAP_BASE_DN: str = ""
+    LDAP_USER_RDN: str = ""
+    LDAP_USERNAME_ATTR: str = "uid"
+    LDAP_EMAIL_ATTR: str = "mail"
+    LDAP_USE_TLS: bool = False
+
+    # ── OIDC（空字符串表示未启用）──
+    OIDC_ISSUER: str = ""
+    OIDC_CLIENT_ID: str = ""
+    OIDC_CLIENT_SECRET: str = ""
+    OIDC_REDIRECT_URI: str = "http://localhost:8000/api/auth/sso/callback"
+
     # ── MySQL（教学数据库，工具用） ──
     MYSQL_HOST: str = "localhost"
     MYSQL_PORT: int = 3306
