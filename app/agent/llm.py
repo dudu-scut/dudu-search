@@ -6,8 +6,14 @@
 """
 
 from langchain.chat_models import init_chat_model
+import httpx
 
 from app.config import settings
+
+# 创建带超时的 httpx 客户端，防止单次 LLM 调用无限等待
+_timeout_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0)
+)
 
 # 使用 OpenAI 兼容协议接入 DeepSeek 模型；具体模型名由 settings.LLM_MODEL 控制
 model = init_chat_model(
@@ -16,4 +22,5 @@ model = init_chat_model(
     api_key=settings.LLM_API_KEY,
     base_url=settings.LLM_BASE_URL,
     extra_body={"thinking": {"type": "disabled"}},
+    http_async_client=_timeout_client,
 )
