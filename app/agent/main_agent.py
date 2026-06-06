@@ -411,11 +411,15 @@ async def run_deep_agent(task_query, session_id, group_id=None):
                                     )
                         elif last_msg.content:
                             # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            logger.info("主智能体执行结果", result_preview=last_msg.content[:100])
-                            monitor.report_task_result(last_msg.content)
+                            content = last_msg.content
+                            # 流式推送部分内容，前端增量渲染
+                            if isinstance(content, str) and len(content) > 0:
+                                monitor.report_streaming_content(content)
+                            logger.info("主智能体执行结果", result_preview=content[:100])
+                            monitor.report_task_result(content)
                             # 持久化 assistant 消息
                             asyncio.create_task(_persist_message(
-                                session_id, "assistant", last_msg.content
+                                session_id, "assistant", content
                             ))
 
     except asyncio.CancelledError:

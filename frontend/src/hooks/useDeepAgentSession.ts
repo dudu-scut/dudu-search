@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { cancelTask, getSessionDetail, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import { cancelTask, deleteUploadedFile, getSessionDetail, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -74,7 +74,11 @@ export function useDeepAgentSession() {
     if (response.error) {
       throw new Error(response.error);
     }
-    setFiles(response.files || []);
+    // 过滤掉用户上传的文件，只保留 Agent 生成的输出文件
+    const outputFiles = (response.files || []).filter(
+      (file) => !uploadedNameSetRef.current.has(file.name)
+    );
+    setFiles(outputFiles);
   }, [sessionPath]);
 
   useEffect(() => {
@@ -127,9 +131,18 @@ export function useDeepAgentSession() {
             }
           }
 
+          if (payload.event === "streaming_content") {
+            const partialContent = extractString(payload.data, "content");
+            if (partialContent) {
+              setResult((previous) => previous + partialContent);
+            }
+          }
+
           if (payload.event === "task_result") {
             const finalResult = extractString(payload.data, "result");
-            setResult(finalResult || payload.message);
+            if (finalResult) {
+              setResult(finalResult);
+            }
             setIsRunning(false);
             setIsCancelling(false);
           }
@@ -289,6 +302,25 @@ export function useDeepAgentSession() {
     [threadId]
   );
 
+  const removeUploadedFile = useCallback(
+    async (itemName: string) => {
+      setLastError("");
+      try {
+        await deleteUploadedFile(threadId, itemName);
+      } catch (error) {
+        // 后端删除失败也不阻塞前端 UI 移除
+        setLastError(error instanceof Error ? error.message : "文件删除失败");
+      }
+
+      // 从 uploadedItems 和 name set 中移除
+      setUploadedItems((previous) =>
+        previous.filter((item) => item.name !== itemName)
+      );
+      uploadedNameSetRef.current.delete(itemName);
+    },
+    [threadId]
+  );
+
   const loadHistoricalSession = useCallback(
     async (threadId: string) => {
       setIsLoadingHistory(true);
@@ -383,6 +415,7 @@ export function useDeepAgentSession() {
     cancelCurrentTask,
     clearHistoryView,
     exitHistoryView,
+    removeUploadedFile,
     submitTask,
     threadId,
     uploadFiles,

@@ -198,6 +198,10 @@ class ToolMonitor:
         """报告任务最终结果"""
         self._emit("task_result", "任务执行完成", {"result": result})
 
+    def report_streaming_content(self, content: str) -> None:
+        """报告流式生成的部分内容（用于前端增量渲染）。"""
+        self._emit("streaming_content", "流式内容更新", {"content": content})
+
     def report_task_cancelled(self) -> None:
         """报告任务已被用户取消"""
         self._emit("task_cancelled", "任务已取消")
