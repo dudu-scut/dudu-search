@@ -179,6 +179,11 @@ async def init_schema() -> None:
             );
         """)
 
+        # 迁移：users 表加 auth_source 列（幂等）
+        await conn.execute("""
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS auth_source VARCHAR(10) NOT NULL DEFAULT 'local';
+        """)
+
         # 迁移：sessions 表加 group_id（幂等）
         await conn.execute("""
             DO $$
