@@ -250,6 +250,16 @@ async def _complete_session(thread_id: str) -> None:
         logger.warning("会话完成标记失败", exc_info=True)
 
 
+async def _fetch_memory_context(thread_id: str, user_message: str) -> str:
+    """异步获取记忆上下文，独立函数便于并行调度。"""
+    try:
+        memory_service = get_memory_service()
+        return await memory_service.build_context(thread_id, user_message)
+    except Exception:
+        logger.warning("记忆上下文获取失败", exc_info=True)
+        return ""
+
+
 async def _run_memory_consolidation(thread_id: str) -> None:
     """后台执行记忆巩固 Pipeline。"""
     try:
@@ -343,13 +353,17 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     4. 若存在上传文件，请先分析内容
     """
 
-    # 检索并注入相关记忆上下文
-    memory_context = ""
+    # 记忆检索与 Agent 就绪后并行发起
+    memory_task = asyncio.create_task(_fetch_memory_context(session_id, task_query))
+    # 持久化用户消息，确保历史会话查看时能看到完整对话
+    asyncio.create_task(_persist_message(session_id, "user", task_query))
+
+    # 等待记忆检索完成
     try:
-        memory_service = get_memory_service()
-        memory_context = await memory_service.build_context(session_id, task_query)
-    except Exception as e:
+        memory_context = await memory_task
+    except Exception:
         logger.warning("记忆上下文获取失败", exc_info=True)
+        memory_context = ""
 
     full_query = task_query + path_instruction
     if memory_context:
@@ -358,9 +372,6 @@ async def run_deep_agent(task_query, session_id, group_id=None):
             f"{memory_context}\n\n"
             f"【用户问题】\n{full_query}"
         )
-
-    # 持久化用户消息，确保历史会话查看时能看到完整对话
-    asyncio.create_task(_persist_message(session_id, "user", task_query))
 
     try:
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
