@@ -49,8 +49,9 @@ export function logout(): void {
 /** Handle OIDC SSO callback — extract token from URL hash fragment and store it. */
 export function handleSSOCallback(): boolean {
   const hash = window.location.hash;
-  if (hash.startsWith("#token=")) {
-    const token = hash.substring("#token=".length);
+  const params = new URLSearchParams(hash.replace(/^#/, "?"));
+  const token = params.get("token");
+  if (token) {
     // Parse JWT payload to get user info
     try {
       const payload = JSON.parse(atob(token.split(".")[1]));

@@ -16,7 +16,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     fetch("/api/auth/sso/providers")
       .then((r) => r.json())
       .then((d) => setProviders(d.providers || []))
-      .catch(() => {});
+      .catch((e) => { console.error("SSO providers fetch failed:", e); });
   }, []);
 
   const handleSubmit = async (values: {
