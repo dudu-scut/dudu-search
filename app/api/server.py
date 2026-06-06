@@ -481,30 +481,31 @@ async def login(request: Request):
 
 
 @app.get("/api/auth/sso/login")
-async def sso_login():
+@limiter.limit("3/minute")
+async def sso_login(request: Request):
     """OIDC SSO 登录入口 — 重定向到身份提供者。"""
     if not OIDCClient.is_enabled():
         raise HTTPException(status_code=404, detail="SSO not configured")
 
     state = OIDCClient.generate_state()
-    nonce = secrets.token_urlsafe(16)
 
     redis = await get_redis()
-    await redis.set(f"sso:state:{state}", nonce, ex=300)
+    await redis.set(f"sso:state:{state}", "1", ex=300)
 
     auth_url = await OIDCClient.get_authorize_url(state)
     return RedirectResponse(url=auth_url, status_code=302)
 
 
 @app.get("/api/auth/sso/callback")
-async def sso_callback(code: str, state: str):
+@limiter.limit("3/minute")
+async def sso_callback(code: str, state: str, request: Request):
     """OIDC SSO 回调 — 验证 state、换 token、创建/匹配用户、返回 JWT。"""
     if not OIDCClient.is_enabled():
         raise HTTPException(status_code=404, detail="SSO not configured")
 
     redis = await get_redis()
-    stored_nonce = await redis.get(f"sso:state:{state}")
-    if stored_nonce is None:
+    stored = await redis.get(f"sso:state:{state}")
+    if stored is None:
         raise AuthError("SSO state 无效或已过期")
     await redis.delete(f"sso:state:{state}")
 
@@ -547,7 +548,8 @@ async def sso_callback(code: str, state: str):
             )
 
     frontend_origin = settings.CORS_ORIGINS.split(",")[0].strip()
-    redirect_url = f"{frontend_origin}/?token={token}"
+    # Use hash fragment to avoid JWT in server logs / browser history / Referer
+    redirect_url = f"{frontend_origin}/#token={token}"
     return RedirectResponse(url=redirect_url, status_code=302)
 
 
