@@ -4,7 +4,7 @@
 
 基于 DeepAgents 框架的多智能体协作系统，主智能体负责理解用户任务、规划步骤、调度子智能体并汇总结果。三个专家子智能体分别负责网络搜索、数据库查询和知识库检索，互补完成信息获取。最终由主智能体生成 Markdown/PDF 交付文档。
 
-已完成全链路生产优化（6 阶段 16 计划）：配置管理、异常体系、JWT 认证、用户组隔离、安全加固、结构化日志、ARQ 任务队列、限流、Prometheus 指标、会话持久化、测试套件、前端增强、容器化部署。
+已完成全链路生产优化（6 阶段 16 计划）：配置管理、异常体系、JWT 认证、用户组隔离、安全加固、结构化日志、ARQ 任务队列、限流、Prometheus 指标、会话持久化、测试套件、前端增强、容器化部署。近期新增 LDAP/OIDC SSO 认证集成，支持多源身份认证。
 
 ## 技术栈
 
@@ -17,7 +17,7 @@
 | 数据库 | PostgreSQL 16 + pgvector (asyncpg 直连) |
 | 缓存/队列 | Redis 7 (缓存 + ARQ 任务队列) |
 | RAG | ChromaDB + sentence-transformers (BAAI/bge-small-zh-v1.5) + jieba BM25 |
-| 认证 | JWT (Bearer Token, PyJWT) + bcrypt 密码哈希 |
+| 认证 | JWT (Bearer Token, PyJWT) + bcrypt 密码哈希 + LDAP (ldap3) + OIDC SSO |
 | 日志 | structlog (JSON/console 双模式, trace_id 注入, 敏感字段脱敏) |
 | 指标 | prometheus-client (Counter/Histogram/Gauge 全链路埋点) |
 | 前端 | React + TypeScript + Vite + Ant Design |
@@ -43,7 +43,9 @@ deepsearch-agents/
 │   │   └── context.py             # ContextVar: trace_id/user_id/group_id/session_dir/thread_id
 │   ├── auth/
 │   │   ├── jwt.py                 # JWT 生成/验证 (create_access_token, hash_password, verify_password)
-│   │   └── dependencies.py        # FastAPI 依赖: get_current_user, require_admin
+│   │   ├── dependencies.py        # FastAPI 依赖: get_current_user, require_admin
+│   │   ├── ldap_client.py         # LDAP 认证: bind + 用户搜索 (ldap3, 配置驱动)
+│   │   └── oidc_client.py         # OIDC SSO: Discovery + code flow (httpx, 配置驱动)
 │   ├── storage/
 │   │   ├── db.py                  # asyncpg 连接池 + Schema: sessions/messages/agent_events/long_term_memories
 │   │   ├── redis_client.py        # Redis 客户端: 缓存/事件/限流/取消信号
@@ -73,8 +75,8 @@ deepsearch-agents/
 │   │   ├── test_db_tools.py       # SQL 安全校验 (20 tests)
 │   │   ├── test_tavily_tool.py    # 搜索工具 (7 tests)
 │   │   └── test_markdown_tools.py # Markdown 工具 (7 tests)
-│   ├── test_api/                  # API 层测试 (31 tests)
-│   │   ├── test_auth.py           # 认证: 注册/登录/me (13 tests)
+│   ├── test_api/                  # API 层测试 (43 tests)
+│   │   ├── test_auth.py           # 认证: 注册/登录/me + LDAP fallback + OIDC SSO (25 tests)
 │   │   ├── test_sessions.py       # 会话 CRUD (7 tests)
 │   │   ├── test_kb.py             # 知识库隔离 (4 tests)
 │   │   ├── test_upload.py         # 文件上传安全 (5 tests)
@@ -94,13 +96,13 @@ deepsearch-agents/
 │   │   │   ├── SessionList.tsx    # 历史会话列表 (30s 轮询)
 │   │   │   ├── TaskHistory.tsx    # 历史任务表格 (搜索/筛选/30s 轮询)
 │   │   │   ├── FilePreview.tsx    # 文件预览弹窗 (图片/Markdown/PDF)
-│   │   │   ├── LoginPage.tsx      # 登录/注册 (表单验证, token 存储)
+│   │   │   ├── LoginPage.tsx      # 登录/注册 + SSO 按钮 (表单验证, token/hash 存储)
 │   │   │   └── MemoryPanel.tsx
 │   │   ├── hooks/
 │   │   │   └── useDeepAgentSession.ts  # WebSocket + 会话状态机 (LIVE↔HISTORICAL, 120 事件上限)
 │   │   ├── lib/
 │   │   │   ├── api.ts             # REST API 函数 (startTask/cancelTask/listSessions/...)
-│   │   │   └── auth.ts            # 前端认证 (getUser/logout/authFetch)
+│   │   │   └── auth.ts            # 前端认证 (getUser/logout/authFetch/handleSSOCallback)
 │   │   └── types.ts
 │   ├── Dockerfile                 # 前端多阶段构建 (pnpm build + nginx)
 │   └── nginx.conf                 # SPA 配置: API 代理/WebSocket/Gzip/缓存
@@ -169,6 +171,18 @@ class Settings(BaseSettings):
     JWT_SECRET: str
     JWT_ALGORITHM: str = "HS256"
     JWT_EXPIRE_MINUTES: int = 1440
+    # LDAP (空字符串 = 未启用)
+    LDAP_URL: str = ""
+    LDAP_BASE_DN: str = ""
+    LDAP_USER_RDN: str = ""
+    LDAP_USERNAME_ATTR: str = "uid"
+    LDAP_EMAIL_ATTR: str = "mail"
+    LDAP_USE_TLS: bool = False
+    # OIDC SSO (空字符串 = 未启用)
+    OIDC_ISSUER: str = ""
+    OIDC_CLIENT_ID: str = ""
+    OIDC_CLIENT_SECRET: str = ""
+    OIDC_REDIRECT_URI: str = "http://localhost:8000/api/auth/sso/callback"
     # Limits
     USER_MAX_CONCURRENT_TASKS: int = 3
     GLOBAL_QPS_LIMIT: int = 50
@@ -258,9 +272,25 @@ docker compose -f docker-compose.prod.yaml up -d
 | `EMBEDDING_MODEL` | 嵌入模型 | `BAAI/bge-small-zh-v1.5` |
 | `SELF_RAG_TOP_K` | 稠密检索返回数 | 4 |
 | `SELF_RAG_BM25_ENABLED` | 启用 BM25 | true |
+| `LDAP_URL` | LDAP 服务器地址 | (空 = 不启用) |
+| `LDAP_BASE_DN` | LDAP Base DN | (空) |
+| `LDAP_USER_RDN` | LDAP 用户搜索起点 | (空) |
+| `LDAP_USERNAME_ATTR` | LDAP 用户名属性 | `uid` |
+| `LDAP_EMAIL_ATTR` | LDAP 邮箱属性 | `mail` |
+| `LDAP_USE_TLS` | LDAP STARTTLS | `false` |
+| `OIDC_ISSUER` | OIDC Issuer URL | (空 = 不启用) |
+| `OIDC_CLIENT_ID` | OIDC Client ID | (空) |
+| `OIDC_CLIENT_SECRET` | OIDC Client Secret | (空) |
+| `OIDC_REDIRECT_URI` | OIDC 回调地址 | `http://localhost:8000/api/auth/sso/callback` |
 
 ## 关键设计决策
 
+- **多源认证体系**: 现有用户名密码 + LDAP + OIDC SSO 三路径并行，配置驱动按需启用
+  - 本地用户优先：login 先查本地表 bcrypt 验证，找不到再 fallback LDAP
+  - LDAP 透明登录：复用现有用户名密码输入框，后端自动 bind → 首次成功自动创建本地用户（`auth_source=ldap`）
+  - OIDC SSO：独立入口 `/api/auth/sso/login` → IdP 重定向 → `/api/auth/sso/callback` → 自动创建用户（`auth_source=oidc`）→ hash fragment 传 JWT
+  - `users` 表 `auth_source` 字段标记来源（`local`/`ldap`/`oidc`），向后兼容
+  - SSO state 防 CSRF（Redis 5min TTL），rate limit 每 IP 3/min
 - **子智能体只获取信息，不生成文件**: 文件生成工具只挂载主智能体
 - **ContextVar 传递上下文**: trace_id/user_id/group_id/session_dir/thread_id 通过 ContextVar 隐式传递
 - **monitor 多通道推送**: `_emit()` → WebSocket + Redis 缓存 + 控制台
