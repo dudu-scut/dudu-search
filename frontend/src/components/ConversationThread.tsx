@@ -37,37 +37,37 @@ interface ConversationThreadProps {
 const TASK_EXAMPLES = [
   {
     tool: "网络搜索工具",
-    title: "联网趋势研判",
+    title: "联网搜索",
     prompt:
-      "请使用网络搜索工具，检索 2026 年行业相关趋势，列出 5 条关键变化，并附上来源链接。",
+      "请使用网络搜索工具，检索您感兴趣的主题，获取最新资讯并整理关键要点，附上来源链接。",
     icon: <CloudServerOutlined aria-hidden />,
   },
   {
     tool: "数据库查询工具",
-    title: "业务数据查询",
+    title: "数据查询",
     prompt:
-      "请使用数据库查询工具，查询相关业务数据，按条件列出关键信息。",
+      "请使用数据库查询工具，根据您的条件查询相关数据，并整理输出关键结果。",
     icon: <DatabaseOutlined aria-hidden />,
   },
   {
     tool: "RAGFlow 知识库",
-    title: "内部文档问答",
+    title: "知识库问答",
     prompt:
-      "请使用 RAGFlow 助手，查询公司内部白皮书中关于品类策略的内容，并整理成三条可执行建议。",
+      "请使用 RAGFlow 知识库，查询相关文档内容，提炼核心信息并整理为可执行建议。",
     icon: <FileSearchOutlined aria-hidden />,
   },
   {
     tool: "文件读取工具",
-    title: "上传文件分析",
+    title: "文件分析",
     prompt:
-      "请使用文件读取工具，读取我上传的文件，提炼核心观点、风险点和待补充信息，并给出下一步分析计划。",
+      "请使用文件读取工具，读取您上传的文件，分析核心内容并给出后续处理建议。",
     icon: <FileTextOutlined aria-hidden />,
   },
   {
     tool: "Markdown/PDF 工具",
-    title: "生成交付报告",
+    title: "报告生成",
     prompt:
-      "请使用 Markdown 文档生成工具和 Markdown 转 PDF 工具，基于本次调研结果生成一份 Markdown 报告，并转换成 PDF 保存到当前工作目录。",
+      "请使用 Markdown 文档生成工具和 Markdown 转 PDF 工具，根据对话或调研内容生成报告并转换为 PDF 文件。",
     icon: <FileMarkdownOutlined aria-hidden />,
   },
 ];
@@ -394,10 +394,10 @@ export function ConversationThread({
       <div className="conversation-empty">
         <div className="empty-examples">
           <div className="empty-examples-copy">
-            <span className="panel-kicker">TASK EXAMPLES</span>
-            <h3>选择一个工具任务开始</h3>
+            <span className="panel-kicker">WELCOME</span>
+            <h3>你好，今天想探索什么？</h3>
             <p>
-              每个示例会触发不同工具路径，执行轨迹和输出文件会直接出现在对话里。
+              选择下方任意工具卡片开始，执行轨迹和输出结果会实时呈现在对话中。
             </p>
           </div>
 

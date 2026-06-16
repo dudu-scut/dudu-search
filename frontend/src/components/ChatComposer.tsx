@@ -131,7 +131,7 @@ export function ChatComposer({
               onSubmit();
             }
           }}
-          placeholder="向 DeepSearch Agents 发送任务..."
+          placeholder="告诉我你想研究什么，我来帮你..."
           value={query}
         />
 

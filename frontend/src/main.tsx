@@ -11,27 +11,27 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
       theme={{
         algorithm: theme.defaultAlgorithm,
         token: {
-          colorPrimary: "#0ea5e9",
+          colorPrimary: "#4a8fd8",
           colorSuccess: "#22c55e",
           colorWarning: "#f59e0b",
           colorError: "#ef4444",
-          colorInfo: "#8b5cf6",
-          colorBgBase: "#f8fafc",
-          colorBgContainer: "rgba(255, 255, 255, 0.96)",
-          colorBorder: "rgba(14, 165, 233, 0.18)",
-          borderRadius: 12,
+          colorInfo: "#6366f1",
+          colorBgBase: "#f8f6f2",
+          colorBgContainer: "rgba(255, 253, 250, 0.96)",
+          colorBorder: "rgba(74, 143, 216, 0.16)",
+          borderRadius: 14,
           fontFamily:
-            "'IBM Plex Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif",
+            "'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif",
           fontFamilyCode:
             "'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', monospace"
         },
         components: {
           Button: {
             controlHeightLG: 46,
-            primaryShadow: "0 0 24px rgba(14, 165, 233, 0.26)"
+            primaryShadow: "0 0 24px rgba(74, 143, 216, 0.22)"
           },
           Input: {
-            activeBorderColor: "#0ea5e9",
+            activeBorderColor: "#4a8fd8",
             hoverBorderColor: "#22c55e"
           }
         }

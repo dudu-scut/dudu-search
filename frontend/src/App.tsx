@@ -99,7 +99,7 @@ function AuthenticatedApp() {
   async function handleSubmit() {
     const cleanQuery = query.trim();
     if (!cleanQuery) {
-      message.warning("请输入研搜任务");
+      message.warning("请输入你想了解的内容");
       return;
     }
 
@@ -115,7 +115,7 @@ function AuthenticatedApp() {
 
     try {
       await session.submitTask(cleanQuery);
-      message.success("任务已启动，执行过程会显示在对话中");
+      message.success("好的，正在为你处理...");
     } catch (error) {
       setTurns((previous) =>
         previous.map((turn) =>
@@ -224,11 +224,11 @@ function AuthenticatedApp() {
         <div className="sidebar-brand">
           <span className="panel-kicker">DEEPSEARCH</span>
           <h1>深度研搜</h1>
-          <p>对话式多智能体研究台</p>
+          <p>多智能体研究助手</p>
         </div>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
-          新建研搜
+          开始新对话
         </Button>
 
         <SessionList
@@ -242,7 +242,7 @@ function AuthenticatedApp() {
         <MemoryPanel />
 
         <div className="sidebar-section">
-          <span className="sidebar-label">THREAD</span>
+          <span className="sidebar-label">会话</span>
           <strong className="thread-id" title={session.threadId}>
             {session.threadId.slice(0, 8)}
           </strong>
@@ -251,7 +251,7 @@ function AuthenticatedApp() {
         <div className="sidebar-status-list">
           <div className={`sidebar-status ${online ? "sidebar-status--online" : "sidebar-status--warn"}`}>
             <ApiOutlined aria-hidden />
-            <span>WebSocket</span>
+            <span>连接状态</span>
             <strong>{connectionLabel(session.connectionState)}</strong>
           </div>
           <div className="sidebar-status">
@@ -272,7 +272,7 @@ function AuthenticatedApp() {
         </div>
 
         <div className="sidebar-section">
-          <span className="sidebar-label">AGENTS</span>
+          <span className="sidebar-label">助手团队</span>
           <ul className="agent-mini-list">
             <li>
               <CloudServerOutlined aria-hidden />
@@ -290,7 +290,7 @@ function AuthenticatedApp() {
         </div>
 
         <div className="sidebar-section sidebar-endpoints">
-          <span className="sidebar-label">ENDPOINTS</span>
+          <span className="sidebar-label">服务地址</span>
           <code>{API_BASE_URL}</code>
           <code>{WS_BASE_URL}</code>
         </div>
@@ -299,8 +299,8 @@ function AuthenticatedApp() {
       <main className="chat-main">
         <header className="chat-topbar">
           <div>
-            <span className="panel-kicker">CHAT WORKSPACE</span>
-            <h2>深度研搜对话</h2>
+            <span className="panel-kicker">对话空间</span>
+            <h2>深度研搜</h2>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <Button
@@ -312,7 +312,7 @@ function AuthenticatedApp() {
             </Button>
             <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
               {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
-              {session.isRunning ? "研搜中" : "待命"}
+              {session.isRunning ? "思考中" : "就绪"}
             </div>
             <Dropdown
               menu={{
@@ -383,7 +383,7 @@ function AuthenticatedApp() {
               </span>
               <Space>
                 <Button size="small" onClick={handleNewSession} type="primary">
-                  新建研搜
+                  开始新对话
                 </Button>
               </Space>
             </div>
