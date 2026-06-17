@@ -46,6 +46,9 @@ dependencies = [
     "structlog>=25.5.0",
     "arq>=0.28.0",
     "prometheus-client>=0.25.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "networkx>=3.6.1",
     "ldap3>=2.9.1",
 ]

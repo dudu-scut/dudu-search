@@ -64,11 +64,35 @@ class Settings(BaseSettings):
     REDIS_PASSWORD: str = "deepagents"
     REDIS_DB: int = 0
 
+    # ── Redis 高可用（Sentinel）──
+    # 当 REDIS_SENTINEL_HOSTS 非空时，自动切换到 Sentinel 模式
+    REDIS_SENTINEL_HOSTS: str = ""  # 逗号分隔，如 "host1:26379,host2:26379"
+    REDIS_SENTINEL_MASTER: str = "mymaster"  # Sentinel 监控的 master 名称
+    REDIS_SENTINEL_PASSWORD: str = ""  # Sentinel 认证密码（可选）
+
+    # ── Redis 连接池 ──
+    REDIS_MAX_CONNECTIONS: int = 20  # 单进程最大 Redis 连接数
+
     @property
     def REDIS_URI(self) -> str:
         if self.REDIS_URI_OVERRIDE:
             return self.REDIS_URI_OVERRIDE
         return f"redis://:{self.REDIS_PASSWORD}@{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
+
+    @property
+    def REDIS_SENTINEL_HOST_LIST(self) -> list[tuple[str, int]]:
+        """解析 Sentinel 主机列表。"""
+        if not self.REDIS_SENTINEL_HOSTS:
+            return []
+        result = []
+        for host_port in self.REDIS_SENTINEL_HOSTS.split(","):
+            host_port = host_port.strip()
+            if ":" in host_port:
+                host, port = host_port.rsplit(":", 1)
+                result.append((host, int(port)))
+            else:
+                result.append((host_port, 26379))
+        return result
 
     # ── LLM ──
     LLM_API_KEY: str = Field("", validation_alias="OPENAI_API_KEY")
@@ -115,6 +139,12 @@ class Settings(BaseSettings):
     MYSQL_COLLATION: str = "utf8mb4_unicode_ci"
     MYSQL_SQL_MODE: str = "TRADITIONAL"
 
+    # ── OpenTelemetry 链路追踪 ──
+    OTEL_ENABLED: bool = False  # 是否启用分布式链路追踪
+    OTEL_SERVICE_NAME: str = "deepagents"  # 服务名称，在 Jaeger/Grafana 中显示
+    OTEL_EXPORTER_ENDPOINT: str = "http://localhost:4317"  # OTLP gRPC 端点（Jaeger 默认 4317）
+    OTEL_EXPORTER_INSECURE: bool = True  # gRPC 是否使用非安全连接（开发环境 True，生产 False）
+
     # ── CORS ──
     CORS_ORIGINS: str = "http://localhost:5173"
 
@@ -128,6 +158,10 @@ class Settings(BaseSettings):
     # ── 任务 ──
     MAX_CONCURRENT_TASKS_PER_USER: int = 3
     TASK_TIMEOUT_SECONDS: int = 300
+
+    # ── Worker 分布式部署 ──
+    WORKER_MAX_JOBS: int = 10  # 单 Worker 进程最大并发任务数
+    WORKER_HEALTH_TTL: int = 30  # Worker 心跳键 TTL（秒），超时视为离线
 
     # ── 会话清理 ──
     SESSION_RETENTION_DAYS: int = 90

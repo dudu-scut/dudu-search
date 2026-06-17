@@ -1,5 +1,6 @@
 import {
   ApiOutlined,
+  BookOutlined,
   BranchesOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
@@ -9,6 +10,7 @@ import {
   HistoryOutlined,
   LogoutOutlined,
   MoonOutlined,
+  SettingOutlined,
   SunOutlined,
   ToolOutlined,
   UserOutlined,
@@ -17,9 +19,12 @@ import { Alert, App as AntApp, Avatar, Button, Dropdown, Space } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatComposer } from "./components/ChatComposer";
 import { ConversationThread } from "./components/ConversationThread";
+import KnowledgeBaseManager from "./components/KnowledgeBaseManager";
 import LoginPage from "./components/LoginPage";
 import MemoryPanel from "./components/MemoryPanel";
+import PromptTemplateManager from "./components/PromptTemplateManager";
 import SessionList from "./components/SessionList";
+import SharedSessionView from "./components/SharedSessionView";
 import TaskHistory from "./components/TaskHistory";
 import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
@@ -56,6 +61,8 @@ function AuthenticatedApp() {
   const [stagedItems, setStagedItems] = useState<UploadedItem[]>([]);
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [showHistory, setShowHistory] = useState(false);
+  const [showPromptManager, setShowPromptManager] = useState(false);
+  const [showKBManager, setShowKBManager] = useState(false);
   const streamRef = useRef<HTMLElement | null>(null);
   const session = useDeepAgentSession();
   const { isDark, toggleTheme } = useTheme();
@@ -319,6 +326,16 @@ function AuthenticatedApp() {
               onClick={toggleTheme}
               title={isDark ? "切换到浅色模式" : "切换到深色模式"}
             />
+            <Button
+              icon={<SettingOutlined />}
+              onClick={() => setShowPromptManager(true)}
+              title="提示词模板管理"
+            />
+            <Button
+              icon={<BookOutlined />}
+              onClick={() => setShowKBManager(true)}
+              title="知识库管理"
+            />
             <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
               {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
               {session.isRunning ? "思考中" : "就绪"}
@@ -419,11 +436,26 @@ function AuthenticatedApp() {
           uploadedItems={session.uploadedItems}
         />
       </main>
+
+      <PromptTemplateManager
+        open={showPromptManager}
+        onClose={() => setShowPromptManager(false)}
+      />
+
+      <KnowledgeBaseManager
+        open={showKBManager}
+        onClose={() => setShowKBManager(false)}
+      />
     </div>
   );
 }
 
 export default function App() {
+  // 分享页面：URL 匹配 /shared/:token 时跳过认证，直接渲染只读视图
+  if (window.location.pathname.startsWith("/shared/")) {
+    return <SharedSessionView />;
+  }
+
   const [loggedIn, setLoggedIn] = useState(() => {
     if (handleSSOCallback()) return true;
     return isLoggedIn();

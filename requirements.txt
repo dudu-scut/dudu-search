@@ -39,6 +39,11 @@ pydantic>=2.0.0             # 数据校验
 python-dotenv==1.2.2        # 环境变量管理
 typing-extensions>=4.5.0    # 类型兼容性支持
 
+# --- 可观测性 (Observability) ---
+opentelemetry-api>=1.25.0              # OpenTelemetry API
+opentelemetry-sdk>=1.25.0              # OpenTelemetry SDK
+opentelemetry-exporter-otlp-proto-grpc>=1.25.0  # OTLP gRPC 导出（Jaeger/Tempo）
+
 # --- 持久化与记忆系统 ---
 asyncpg>=0.30.0
 redis>=5.2.0

@@ -66,6 +66,7 @@ from app.storage.redis_client import (
 )
 from app.storage.db import get_pool, init_schema, close_pool
 from app.storage.storage import get_output_storage, get_upload_storage, get_doc_storage
+from app.tracing import init_tracing, shutdown_tracing, TracingMiddleware
 
 logger = get_logger("server")
 
@@ -109,6 +110,11 @@ async def lifespan(_app: FastAPI):
     ))
     _app.state.arq_client = arq_client
     logger.info("ARQ 任务队列客户端已初始化")
+
+    # 初始化 OpenTelemetry 链路追踪（OTEL_ENABLED=False 时自动跳过）
+    tracing_enabled = init_tracing(settings)
+    if tracing_enabled:
+        logger.info("OpenTelemetry 链路追踪已启用", endpoint=settings.OTEL_EXPORTER_ENDPOINT)
 
     yield  # 服务运行中
 
@@ -168,6 +174,12 @@ async def lifespan(_app: FastAPI):
         await close_redis()
     except Exception as e:
         logger.warning("关闭 Redis 连接失败", exc_info=True)
+
+    # 6. 关闭 OpenTelemetry（刷新缓冲的 span）
+    try:
+        await shutdown_tracing()
+    except Exception:
+        pass
 
     logger.info("服务已关闭")
 
@@ -248,6 +260,12 @@ async def trace_id_middleware(request: Request, call_next):
     return response
 
 
+# ── OpenTelemetry 链路追踪中间件 ──
+# 必须在 trace_id_middleware 之后注册，这样 app.trace_id 才能注入到 span 属性中
+
+app.add_middleware(TracingMiddleware)
+
+
 # ── 全局 QPS 限流中间件 ──
 
 @app.middleware("http")
@@ -259,9 +277,9 @@ async def rate_limit_middleware(request: Request, call_next):
     path = request.url.path
 
     # 跳过不需要限流的路径
-    if path in ("/api/health", "/live", "/ready", "/metrics"):
+    if path in ("/api/health", "/live", "/ready", "/metrics", "/api/workers/health"):
         return await call_next(request)
-    if path.startswith("/ws") or path.startswith("/api/events") or request.method == "OPTIONS":
+    if path.startswith("/ws") or path.startswith("/api/events") or path.startswith("/api/shared") or request.method == "OPTIONS":
         return await call_next(request)
 
     try:
@@ -1393,6 +1411,203 @@ async def delete_session(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"删除会话失败: {e}")
+
+
+# ── 会话分享 API ──
+
+
+class ShareCreateRequest(BaseModel):
+    title: Optional[str] = None
+    expires_hours: Optional[int] = None  # 过期时间（小时），None 表示永不过期
+
+
+@app.post("/api/sessions/{thread_id}/share")
+async def create_share_link(
+    thread_id: str,
+    body: ShareCreateRequest,
+    user: UserInfo = Depends(get_current_user),
+):
+    """为指定会话创建分享链接（只读）。
+
+    只有会话所有者或管理员可以创建分享链接。
+    生成唯一 share_token，访问者通过 /api/shared/{token} 查看。
+    """
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 验证会话存在且属于当前用户
+        row = await conn.fetchrow(
+            "SELECT thread_id, title FROM sessions WHERE thread_id = $1",
+            thread_id,
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="会话不存在")
+
+        # 所有权检查（非管理员只能分享自己的会话）
+        owner_row = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE thread_id = $1",
+            thread_id,
+        )
+        if not user.is_admin and owner_row and str(owner_row["user_id"]) != str(user.id):
+            raise HTTPException(status_code=403, detail="无权分享此会话")
+
+        # 生成分享 token
+        share_token = secrets.token_urlsafe(24)
+        title = body.title or row["title"] or f"分享的会话 {thread_id[:8]}"
+        expires_at = None
+        if body.expires_hours:
+            from datetime import datetime, timezone, timedelta
+            expires_at = datetime.now(timezone.utc) + timedelta(hours=body.expires_hours)
+
+        await conn.execute(
+            """INSERT INTO session_shares (share_token, thread_id, created_by, title, expires_at)
+               VALUES ($1, $2, $3, $4, $5)""",
+            share_token,
+            thread_id,
+            str(user.id),
+            title,
+            expires_at,
+        )
+
+        return {
+            "share_token": share_token,
+            "thread_id": thread_id,
+            "title": title,
+            "expires_at": expires_at.isoformat() if expires_at else None,
+            "share_url": f"/shared/{share_token}",
+        }
+
+
+@app.get("/api/sessions/{thread_id}/shares")
+async def list_share_links(
+    thread_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
+    """列出指定会话的所有分享链接。"""
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT share_token, title, is_active, view_count, expires_at, created_at
+               FROM session_shares
+               WHERE thread_id = $1
+               ORDER BY created_at DESC""",
+            thread_id,
+        )
+        shares = []
+        for row in rows:
+            shares.append({
+                "share_token": row["share_token"],
+                "title": row["title"],
+                "is_active": row["is_active"],
+                "view_count": row["view_count"],
+                "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
+                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "share_url": f"/shared/{row['share_token']}",
+            })
+        return {"shares": shares, "total": len(shares)}
+
+
+@app.get("/api/shared/{share_token}")
+async def get_shared_session(share_token: str):
+    """公开访问分享会话（只读，无需认证）。
+
+    返回会话基本信息和消息列表，不包含敏感的事件数据。
+    """
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 查询分享记录
+        share = await conn.fetchrow(
+            """SELECT s.thread_id, s.title, s.is_active, s.expires_at
+               FROM session_shares s
+               WHERE s.share_token = $1""",
+            share_token,
+        )
+        if not share:
+            raise HTTPException(status_code=404, detail="分享链接不存在")
+
+        if not share["is_active"]:
+            raise HTTPException(status_code=410, detail="分享链接已失效")
+
+        # 检查过期
+        if share["expires_at"]:
+            from datetime import datetime, timezone
+            if datetime.now(timezone.utc) > share["expires_at"]:
+                raise HTTPException(status_code=410, detail="分享链接已过期")
+
+        # 获取会话详情
+        session = await conn.fetchrow(
+            "SELECT thread_id, title, status, started_at, completed_at FROM sessions WHERE thread_id = $1",
+            share["thread_id"],
+        )
+        if not session:
+            raise HTTPException(status_code=404, detail="原始会话已被删除")
+
+        # 获取消息列表（只返回 user 和 assistant 消息，隐藏 system/tool 消息）
+        messages = await conn.fetch(
+            """SELECT role, content, created_at
+               FROM messages
+               WHERE thread_id = $1 AND role IN ('user', 'assistant')
+               ORDER BY created_at ASC""",
+            share["thread_id"],
+        )
+
+        # 递增访问计数
+        await conn.execute(
+            "UPDATE session_shares SET view_count = view_count + 1 WHERE share_token = $1",
+            share_token,
+        )
+
+        return {
+            "thread_id": session["thread_id"],
+            "title": share["title"] or session["title"],
+            "status": session["status"],
+            "started_at": session["started_at"].isoformat() if session["started_at"] else None,
+            "completed_at": session["completed_at"].isoformat() if session["completed_at"] else None,
+            "messages": [
+                {
+                    "role": msg["role"],
+                    "content": msg["content"],
+                    "created_at": msg["created_at"].isoformat() if msg["created_at"] else None,
+                }
+                for msg in messages
+            ],
+            "shared_by": True,  # 标记这是分享视图
+        }
+
+
+@app.delete("/api/shared/{share_token}")
+async def revoke_share_link(
+    share_token: str,
+    user: UserInfo = Depends(get_current_user),
+):
+    """撤销分享链接（软删除，设为 is_active=False）。"""
+    from app.storage.db import get_pool
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 只有创建者或管理员可以撤销
+        share = await conn.fetchrow(
+            "SELECT created_by, thread_id FROM session_shares WHERE share_token = $1",
+            share_token,
+        )
+        if not share:
+            raise HTTPException(status_code=404, detail="分享链接不存在")
+
+        if not user.is_admin and str(share["created_by"]) != str(user.id):
+            raise HTTPException(status_code=403, detail="无权撤销此分享链接")
+
+        await conn.execute(
+            "UPDATE session_shares SET is_active = FALSE WHERE share_token = $1",
+            share_token,
+        )
+        return {"status": "revoked", "share_token": share_token}
+
+
 # ---- 记忆管理 API ----
 
 class MemoryCreateRequest(BaseModel):
@@ -1603,6 +1818,186 @@ async def ingest_files(
     return {"status": "done", "kb_name": kb_name, "results": results}
 
 
+# ── 自定义提示词模板 ──
+
+
+class PromptTemplateCreateRequest(BaseModel):
+    """创建提示词模板请求体。"""
+    name: str
+    scope: str = "group"  # "group" 或 "user"
+    agent_type: str = "main"
+    system_prompt: str
+    is_active: bool = True
+
+
+class PromptTemplateUpdateRequest(BaseModel):
+    """更新提示词模板请求体。"""
+    name: str | None = None
+    system_prompt: str | None = None
+    is_active: bool | None = None
+
+
+@app.get("/api/prompt-templates")
+async def list_prompt_templates(user: UserInfo = Depends(get_current_user)):
+    """列出当前用户可见的提示词模板（组级 + 用户级）。"""
+    from app.storage.db import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, name, scope, owner_id, group_id, agent_type,
+                   system_prompt, is_active, created_at, updated_at
+            FROM prompt_templates
+            WHERE (scope = 'group' AND group_id = $1)
+               OR (scope = 'user' AND owner_id = $2)
+            ORDER BY scope, name
+            """,
+            user.group_id, user.id,
+        )
+    templates = [
+        {
+            "id": str(row["id"]),
+            "name": row["name"],
+            "scope": row["scope"],
+            "owner_id": row["owner_id"],
+            "group_id": row["group_id"],
+            "agent_type": row["agent_type"],
+            "system_prompt": row["system_prompt"],
+            "is_active": row["is_active"],
+            "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+            "updated_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+        }
+        for row in rows
+    ]
+    return {"templates": templates, "total": len(templates)}
+
+
+@app.post("/api/prompt-templates")
+async def create_prompt_template(body: PromptTemplateCreateRequest, user: UserInfo = Depends(get_current_user)):
+    """创建一个新的提示词模板。scope=user 时仅自己可见，scope=group 时组内可见（仅管理员）。"""
+    if body.scope == "group" and user.role != "admin":
+        raise HTTPException(status_code=403, detail="仅管理员可创建组级模板")
+    if body.scope not in ("group", "user"):
+        raise HTTPException(status_code=422, detail="scope 必须为 group 或 user")
+    if not body.system_prompt.strip():
+        raise HTTPException(status_code=422, detail="提示词内容不能为空")
+
+    from app.storage.db import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO prompt_templates (name, scope, owner_id, group_id, agent_type, system_prompt, is_active)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING id, name, scope, agent_type, is_active, created_at
+            """,
+            body.name, body.scope,
+            user.id if body.scope == "user" else None,
+            user.group_id if body.scope == "group" else None,
+            body.agent_type, body.system_prompt, body.is_active,
+        )
+    return {
+        "id": str(row["id"]),
+        "name": row["name"],
+        "scope": row["scope"],
+        "agent_type": row["agent_type"],
+        "is_active": row["is_active"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+@app.put("/api/prompt-templates/{template_id}")
+async def update_prompt_template(
+    template_id: str,
+    body: PromptTemplateUpdateRequest,
+    user: UserInfo = Depends(get_current_user),
+):
+    """更新指定的提示词模板。组级模板仅管理员可修改，用户级模板仅创建者可修改。"""
+    from app.storage.db import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id, scope, owner_id, group_id FROM prompt_templates WHERE id = $1::uuid",
+            template_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="模板不存在")
+        # 权限校验
+        if existing["scope"] == "group" and user.role != "admin":
+            raise HTTPException(status_code=403, detail="仅管理员可修改组级模板")
+        if existing["scope"] == "user" and existing["owner_id"] != user.id:
+            raise HTTPException(status_code=403, detail="只能修改自己的模板")
+
+        # 动态构建 UPDATE
+        set_clauses = []
+        params = []
+        idx = 1
+        if body.name is not None:
+            set_clauses.append(f"name = ${idx}")
+            params.append(body.name)
+            idx += 1
+        if body.system_prompt is not None:
+            set_clauses.append(f"system_prompt = ${idx}")
+            params.append(body.system_prompt)
+            idx += 1
+        if body.is_active is not None:
+            set_clauses.append(f"is_active = ${idx}")
+            params.append(body.is_active)
+            idx += 1
+        if not set_clauses:
+            raise HTTPException(status_code=422, detail="至少需要提供一个更新字段")
+        set_clauses.append(f"updated_at = NOW()")
+        params.append(template_id)
+
+        await conn.execute(
+            f"UPDATE prompt_templates SET {', '.join(set_clauses)} WHERE id = ${idx}::uuid",
+            *params,
+        )
+    return {"status": "updated"}
+
+
+@app.delete("/api/prompt-templates/{template_id}")
+async def delete_prompt_template(
+    template_id: str,
+    user: UserInfo = Depends(get_current_user),
+):
+    """删除指定的提示词模板（硬删除）。权限规则同更新。"""
+    from app.storage.db import get_pool
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT scope, owner_id FROM prompt_templates WHERE id = $1::uuid",
+            template_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="模板不存在")
+        if existing["scope"] == "group" and user.role != "admin":
+            raise HTTPException(status_code=403, detail="仅管理员可删除组级模板")
+        if existing["scope"] == "user" and existing["owner_id"] != user.id:
+            raise HTTPException(status_code=403, detail="只能删除自己的模板")
+
+        await conn.execute(
+            "DELETE FROM prompt_templates WHERE id = $1::uuid",
+            template_id,
+        )
+    return {"status": "deleted"}
+
+
+@app.get("/api/prompt-templates/default")
+async def get_default_prompt(user: UserInfo = Depends(get_current_user)):
+    """获取当前用户实际使用的系统提示词（用于预览和调试）。
+
+    返回活跃模板的提示词，若无自定义模板则返回默认 YAML 提示词。
+    """
+    from app.agent.prompts import main_agent_content
+    from app.agent.main_agent import _get_custom_system_prompt
+
+    custom = await _get_custom_system_prompt(user.id, user.group_id)
+    if custom:
+        return {"source": "custom", "system_prompt": custom}
+    return {"source": "default", "system_prompt": main_agent_content["system_prompt"]}
+
+
 # ── 健康检查端点 ──
 
 
@@ -1664,6 +2059,35 @@ async def readiness():
     if result.status_code == 503:
         raise HTTPException(status_code=503, detail="服务未就绪")
     return result
+
+
+# ── Worker 健康检查 ──
+
+
+@app.get("/api/workers/health")
+async def worker_health(user: UserInfo = Depends(require_admin)):
+    """查询所有在线 ARQ Worker 进程的状态（仅管理员可访问）。
+
+    每个 Worker 进程通过 Redis 心跳定期上报状态，TTL 过期自动消失。
+    可用于监控多 Worker 分布式部署的健康状况。
+    """
+    from app.storage.redis_client import get_worker_health, get_active_task_ids
+
+    workers = await get_worker_health()
+    active_task_ids = await get_active_task_ids()
+
+    total_active_jobs = sum(w.get("active_jobs", 0) for w in workers)
+    total_capacity = len(workers) * settings.WORKER_MAX_JOBS
+
+    return {
+        "workers": workers,
+        "worker_count": len(workers),
+        "total_active_jobs": total_active_jobs,
+        "total_capacity": total_capacity,
+        "utilization": round(total_active_jobs / total_capacity, 2) if total_capacity > 0 else 0,
+        "active_task_ids": active_task_ids,
+        "redis_mode": "sentinel" if settings.REDIS_SENTINEL_HOST_LIST else "standalone",
+    }
 
 
 # ── Prometheus 指标端点 ──

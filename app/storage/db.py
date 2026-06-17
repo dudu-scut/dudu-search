@@ -245,4 +245,38 @@ async def init_schema() -> None:
             END $$;
         """)
 
+        # 会话分享表 — 支持生成只读分享链接
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_shares (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                share_token VARCHAR(32) UNIQUE NOT NULL,
+                thread_id VARCHAR(64) NOT NULL REFERENCES sessions(thread_id) ON DELETE CASCADE,
+                created_by VARCHAR(64) NOT NULL,
+                title VARCHAR(256),
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                expires_at TIMESTAMPTZ,
+                view_count INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_shares_thread ON session_shares(thread_id);
+            CREATE INDEX IF NOT EXISTS idx_shares_token ON session_shares(share_token);
+        """)
+
+        # 自定义提示词模板表 — per-group / per-user 定制系统提示词
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS prompt_templates (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                name VARCHAR(128) NOT NULL,
+                scope VARCHAR(16) NOT NULL DEFAULT 'group',
+                owner_id VARCHAR(64),
+                group_id INTEGER REFERENCES user_groups(id) ON DELETE CASCADE,
+                agent_type VARCHAR(32) NOT NULL DEFAULT 'main',
+                system_prompt TEXT NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_templates_scope ON prompt_templates(scope, group_id, owner_id);
+        """)
+
         logger.info("Schema 初始化完成")

@@ -2,9 +2,14 @@
 Redis 客户端管理。
 
 提供异步 Redis 客户端的创建、关闭，以及热状态操作的辅助方法。
+支持两种模式：
+  1. 单机模式（默认）：直接连接单个 Redis 实例
+  2. Sentinel 模式：通过 Redis Sentinel 自动发现 master，支持故障转移
 """
 import asyncio
 import json
+import os
+import uuid
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -16,6 +21,9 @@ REDIS_URI = settings.REDIS_URI
 _client: Optional[aioredis.Redis] = None
 _lock: Optional[asyncio.Lock] = None
 
+# Worker 身份标识 — 每个进程唯一
+_WORKER_ID = f"worker:{uuid.uuid4().hex[:8]}:{os.getpid()}"
+
 
 def _get_lock() -> asyncio.Lock:
     """懒初始化 Lock，避免模块加载时在事件循环外创建。"""
@@ -23,6 +31,45 @@ def _get_lock() -> asyncio.Lock:
     if _lock is None:
         _lock = asyncio.Lock()
     return _lock
+
+
+def _create_redis_client() -> aioredis.Redis:
+    """创建 Redis 客户端，自动选择单机或 Sentinel 模式。"""
+    sentinel_hosts = settings.REDIS_SENTINEL_HOST_LIST
+
+    if sentinel_hosts:
+        # ── Sentinel 模式 ──
+        # redis.asyncio.sentinel 会自动发现 master 并处理故障转移
+        from redis.asyncio.sentinel import Sentinel
+
+        sentinel_kwargs = {}
+        if settings.REDIS_SENTINEL_PASSWORD:
+            sentinel_kwargs["password"] = settings.REDIS_SENTINEL_PASSWORD
+
+        sentinel = Sentinel(
+            sentinel_hosts,
+            sentinel_kwargs=sentinel_kwargs,
+            decode_responses=True,
+        )
+        connection_kwargs = {
+            "max_connections": settings.REDIS_MAX_CONNECTIONS,
+        }
+        if settings.REDIS_PASSWORD:
+            connection_kwargs["password"] = settings.REDIS_PASSWORD
+        if settings.REDIS_DB:
+            connection_kwargs["db"] = settings.REDIS_DB
+
+        return sentinel.master_for(
+            settings.REDIS_SENTINEL_MASTER,
+            connection_kwargs=connection_kwargs,
+        )
+
+    # ── 单机模式 ──
+    return aioredis.from_url(
+        REDIS_URI,
+        decode_responses=True,
+        max_connections=settings.REDIS_MAX_CONNECTIONS,
+    )
 
 
 async def get_redis() -> aioredis.Redis:
@@ -33,7 +80,7 @@ async def get_redis() -> aioredis.Redis:
     async with _get_lock():
         if _client is not None:
             return _client
-        _client = aioredis.from_url(REDIS_URI, decode_responses=True)
+        _client = _create_redis_client()
         return _client
 
 
@@ -48,6 +95,54 @@ async def close_redis() -> None:
         if _client is not None:
             await _client.close()
             _client = None
+
+
+def get_worker_id() -> str:
+    """返回当前 Worker 进程的唯一标识。"""
+    return _WORKER_ID
+
+
+# ── Worker 心跳 ──
+# 每个 Worker 进程定期写入 Redis，Server 可查询在线 Worker 数量
+
+_WORKER_HEALTH_PREFIX = "worker:health"
+
+
+async def update_worker_heartbeat(active_jobs: int = 0) -> None:
+    """Worker 心跳上报 — 写入当前 Worker 状态到 Redis（带 TTL）。
+
+    :param active_jobs: 当前 Worker 正在处理的任务数
+    """
+    r = await get_redis()
+    key = f"{_WORKER_HEALTH_PREFIX}:{_WORKER_ID}"
+    await r.set(
+        key,
+        json.dumps({
+            "worker_id": _WORKER_ID,
+            "pid": os.getpid(),
+            "active_jobs": active_jobs,
+            "timestamp": asyncio.get_event_loop().time(),
+        }),
+        ex=settings.WORKER_HEALTH_TTL,
+    )
+
+
+async def get_worker_health() -> list[dict]:
+    """查询所有在线 Worker 的状态（Server 端调用）。
+
+    :return: Worker 状态列表，每个 Worker 包含 worker_id、pid、active_jobs
+    """
+    r = await get_redis()
+    pattern = f"{_WORKER_HEALTH_PREFIX}:*"
+    workers = []
+    async for key in r.scan_iter(match=pattern, count=50):
+        raw = await r.get(key)
+        if raw:
+            try:
+                workers.append(json.loads(raw))
+            except (json.JSONDecodeError, TypeError):
+                continue
+    return workers
 
 
 # ---- 热状态辅助操作 ----
@@ -127,8 +222,30 @@ async def _create_pubsub_connection() -> aioredis.Redis:
     """为 Pub/Sub 创建独立 Redis 连接，避免与共享 _client 互相干扰。
 
     Pub/Sub 模式下多个订阅者共享同一连接会导致消息路由混乱，
-    每个订阅者应使用独立连接。
+    每个订阅者应使用独立连接。同样支持 Sentinel 模式。
     """
+    sentinel_hosts = settings.REDIS_SENTINEL_HOST_LIST
+
+    if sentinel_hosts:
+        from redis.asyncio.sentinel import Sentinel
+        sentinel_kwargs = {}
+        if settings.REDIS_SENTINEL_PASSWORD:
+            sentinel_kwargs["password"] = settings.REDIS_SENTINEL_PASSWORD
+        sentinel = Sentinel(
+            sentinel_hosts,
+            sentinel_kwargs=sentinel_kwargs,
+            decode_responses=True,
+        )
+        connection_kwargs = {}
+        if settings.REDIS_PASSWORD:
+            connection_kwargs["password"] = settings.REDIS_PASSWORD
+        if settings.REDIS_DB:
+            connection_kwargs["db"] = settings.REDIS_DB
+        return sentinel.master_for(
+            settings.REDIS_SENTINEL_MASTER,
+            connection_kwargs=connection_kwargs,
+        )
+
     return aioredis.from_url(REDIS_URI, decode_responses=True)
 
 

@@ -96,3 +96,86 @@ export interface SessionEvent {
   payload: Record<string, unknown>;
   created_at: string;
 }
+
+export interface SharedSessionResponse {
+  thread_id: string;
+  title: string | null;
+  status: string;
+  started_at: string | null;
+  completed_at: string | null;
+  messages: SessionMessage[];
+  shared_by: boolean;
+}
+
+export interface ShareLink {
+  share_token: string;
+  title: string;
+  is_active: boolean;
+  view_count: number;
+  expires_at: string | null;
+  created_at: string | null;
+  share_url: string;
+}
+
+export interface ShareListResponse {
+  shares: ShareLink[];
+  total: number;
+}
+
+export interface PromptTemplate {
+  id: string;
+  name: string;
+  scope: "group" | "user";
+  owner_id: string | null;
+  group_id: number | null;
+  agent_type: string;
+  system_prompt: string;
+  is_active: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface PromptTemplateListResponse {
+  templates: PromptTemplate[];
+  total: number;
+}
+
+export interface PromptTemplateCreateRequest {
+  name: string;
+  scope: "group" | "user";
+  agent_type?: string;
+  system_prompt: string;
+  is_active?: boolean;
+}
+
+export interface PromptTemplateUpdateRequest {
+  name?: string;
+  system_prompt?: string;
+  is_active?: boolean;
+}
+
+export interface DefaultPromptResponse {
+  source: "custom" | "default";
+  system_prompt: string;
+}
+
+export interface KnowledgeBase {
+  name: string;
+  description: string;
+  kb_id: string;
+}
+
+export interface KnowledgeBaseListResponse {
+  knowledge_bases: KnowledgeBase[];
+}
+
+export interface KnowledgeBaseCreateRequest {
+  name: string;
+  description?: string;
+}
+
+export interface KnowledgeBaseIngestResponse {
+  status: string;
+  kb_name: string;
+  results: Record<string, string>;
+}

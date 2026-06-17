@@ -1,6 +1,23 @@
 import { API_BASE_URL } from "./config";
 import { clearToken, getToken } from "./auth";
-import type { CancelTaskResponse, FileListResponse, SessionDetail, SessionListResponse, TaskResponse, UploadResponse } from "../types";
+import type {
+  CancelTaskResponse,
+  DefaultPromptResponse,
+  FileListResponse,
+  KnowledgeBaseCreateRequest,
+  KnowledgeBaseIngestResponse,
+  KnowledgeBaseListResponse,
+  PromptTemplateCreateRequest,
+  PromptTemplateListResponse,
+  PromptTemplateUpdateRequest,
+  SessionDetail,
+  SessionListResponse,
+  ShareLink,
+  ShareListResponse,
+  SharedSessionResponse,
+  TaskResponse,
+  UploadResponse,
+} from "../types";
 
 function apiUrl(path: string): string {
   return API_BASE_URL ? `${API_BASE_URL}${path}` : `${window.location.origin}${path}`;
@@ -117,4 +134,159 @@ export async function deleteSession(
     apiUrl(`/api/sessions/${encodeURIComponent(threadId)}`),
     { method: "DELETE" }
   );
+}
+
+// ── 会话分享 API ──
+
+/** 公开接口：通过分享 token 获取只读会话（无需认证） */
+export async function getSharedSession(token: string): Promise<SharedSessionResponse> {
+  return requestJson<SharedSessionResponse>(
+    apiUrl(`/api/shared/${encodeURIComponent(token)}`)
+  );
+}
+
+/** 创建会话分享链接 */
+export async function createShareLink(
+  threadId: string,
+  options?: { title?: string; expiresHours?: number }
+): Promise<ShareLink> {
+  return requestJson<ShareLink>(
+    apiUrl(`/api/sessions/${encodeURIComponent(threadId)}/share`),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: options?.title,
+        expires_hours: options?.expiresHours,
+      }),
+    }
+  );
+}
+
+/** 获取会话的所有分享链接 */
+export async function listShareLinks(threadId: string): Promise<ShareListResponse> {
+  return requestJson<ShareListResponse>(
+    apiUrl(`/api/sessions/${encodeURIComponent(threadId)}/shares`)
+  );
+}
+
+/** 撤销分享链接 */
+export async function revokeShareLink(shareToken: string): Promise<{ status: string }> {
+  return requestJson(
+    apiUrl(`/api/shared/${encodeURIComponent(shareToken)}`),
+    { method: "DELETE" }
+  );
+}
+
+// ── 提示词模板 API ──
+
+/** 获取当前用户可见的提示词模板列表 */
+export async function listPromptTemplates(): Promise<PromptTemplateListResponse> {
+  return requestJson<PromptTemplateListResponse>(
+    apiUrl("/api/prompt-templates")
+  );
+}
+
+/** 创建新的提示词模板 */
+export async function createPromptTemplate(
+  data: PromptTemplateCreateRequest
+): Promise<{ id: string; name: string; scope: string }> {
+  return requestJson(
+    apiUrl("/api/prompt-templates"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
+  );
+}
+
+/** 更新提示词模板 */
+export async function updatePromptTemplate(
+  templateId: string,
+  data: PromptTemplateUpdateRequest
+): Promise<{ status: string }> {
+  return requestJson(
+    apiUrl(`/api/prompt-templates/${encodeURIComponent(templateId)}`),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
+  );
+}
+
+/** 删除提示词模板 */
+export async function deletePromptTemplate(
+  templateId: string
+): Promise<{ status: string }> {
+  return requestJson(
+    apiUrl(`/api/prompt-templates/${encodeURIComponent(templateId)}`),
+    { method: "DELETE" }
+  );
+}
+
+/** 获取当前生效的系统提示词（用于预览） */
+export async function getDefaultPrompt(): Promise<DefaultPromptResponse> {
+  return requestJson<DefaultPromptResponse>(
+    apiUrl("/api/prompt-templates/default")
+  );
+}
+
+// ── 知识库管理 API ──
+
+/** 获取当前用户组可见的知识库列表 */
+export async function listKnowledgeBases(): Promise<KnowledgeBaseListResponse> {
+  return requestJson<KnowledgeBaseListResponse>(
+    apiUrl("/api/kb/list")
+  );
+}
+
+/** 创建新的知识库 */
+export async function createKnowledgeBase(
+  data: KnowledgeBaseCreateRequest
+): Promise<{ status: string; kb_id: string; name: string }> {
+  return requestJson(
+    apiUrl("/api/kb/create"),
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }
+  );
+}
+
+/** 删除知识库 */
+export async function deleteKnowledgeBase(
+  kbName: string
+): Promise<{ status: string; name: string }> {
+  return requestJson(
+    apiUrl(`/api/kb/${encodeURIComponent(kbName)}`),
+    { method: "DELETE" }
+  );
+}
+
+/** 向知识库摄入文档文件 */
+export async function ingestKBFiles(
+  kbName: string,
+  files: File[]
+): Promise<KnowledgeBaseIngestResponse> {
+  const formData = new FormData();
+  formData.append("kb_name", kbName);
+  for (const file of files) {
+    formData.append("files", file);
+  }
+  const headers: Record<string, string> = {
+    ...authHeader(),
+  };
+  const response = await fetch(apiUrl("/api/kb/ingest"), {
+    method: "POST",
+    headers,
+    body: formData,
+  });
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(text || `摄入失败 (${response.status})`);
+  }
+  return response.json() as Promise<KnowledgeBaseIngestResponse>;
 }

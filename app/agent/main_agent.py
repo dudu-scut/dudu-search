@@ -165,20 +165,66 @@ async def _retryable_astream(agent, input_data, config):
     raise LLMError(f"Agent 流式执行失败（已重试 3 次）: {error_detail}")
 
 
-def _build_main_agent(current_date: str, checkpointer=None):
+async def _get_custom_system_prompt(user_id: str, group_id: int | None) -> str | None:
+    """查询活跃的自定义提示词模板，优先级：user 级 > group 级。
+
+    如果找到匹配的活跃模板，返回其 system_prompt 文本；否则返回 None，
+    表示使用默认的 YAML 提示词。
+    """
+    try:
+        from app.storage.db import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # 优先匹配用户级模板
+            if user_id:
+                row = await conn.fetchrow(
+                    "SELECT system_prompt FROM prompt_templates "
+                    "WHERE scope = 'user' AND owner_id = $1 AND agent_type = 'main' "
+                    "AND is_active = TRUE ORDER BY updated_at DESC LIMIT 1",
+                    user_id,
+                )
+                if row:
+                    return row["system_prompt"]
+            # 其次匹配组级模板
+            if group_id is not None:
+                row = await conn.fetchrow(
+                    "SELECT system_prompt FROM prompt_templates "
+                    "WHERE scope = 'group' AND group_id = $1 AND agent_type = 'main' "
+                    "AND is_active = TRUE ORDER BY updated_at DESC LIMIT 1",
+                    group_id,
+                )
+                if row:
+                    return row["system_prompt"]
+    except Exception:
+        logger.warning("自定义提示词模板查询失败，使用默认提示词", exc_info=True)
+    return None
+
+
+def _build_main_agent(current_date: str, checkpointer=None, custom_system_prompt: str | None = None):
     """按当前日期构建主智能体，确保系统提示词包含正确的时间信息。
 
     DeepAgents 子智能体在独立会话中运行，无法读取父会话用户消息，
     因此日期必须写进系统提示词，子智能体才能感知。
 
+    当 custom_system_prompt 不为 None 时，使用自定义模板替代默认 YAML 提示词。
+    自定义模板同样支持 {current_date} 占位符。
+
     checkpointer 由调用方负责生命周期管理（AsyncPostgresSaver 需要在
     async with 上下文中使用，退出上下文时连接池会关闭）。
     """
+    if custom_system_prompt:
+        try:
+            system_prompt = custom_system_prompt.format(current_date=current_date)
+        except KeyError:
+            # 自定义模板中可能有未定义的占位符，安全降级
+            system_prompt = custom_system_prompt.replace("{current_date}", current_date)
+    else:
+        system_prompt = main_agent_content["system_prompt"].format(
+            current_date=current_date
+        )
     return create_deep_agent(
         model=model,
-        system_prompt=main_agent_content["system_prompt"].format(
-            current_date=current_date
-        ),
+        system_prompt=system_prompt,
         tools=_BASE_TOOLS,
         checkpointer=checkpointer,
         subagents=_BASE_SUBAGENTS,
@@ -278,7 +324,7 @@ async def _run_memory_consolidation(thread_id: str) -> None:
         logger.warning("会话巩固异常", exc_info=True)
 
 
-async def run_deep_agent(task_query, session_id, group_id=None):
+async def run_deep_agent(task_query, session_id, group_id=None, user_id=None):
     """
     异步流式执行主智能体
 
@@ -287,6 +333,7 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     :param task_query: 前端提交的原始任务问题
     :param session_id: 当前任务 ID，同时用于 thread_id、输出目录和 WebSocket 定向推送
     :param group_id: 用户组 ID，用于知识库等工具层隔离过滤（可选）
+    :param user_id: 用户 ID，用于查询自定义提示词模板（可选）
     """
     logger.info("开始执行会话", session_id=session_id)
 
@@ -346,7 +393,13 @@ async def run_deep_agent(task_query, session_id, group_id=None):
 
     # 复用 checkpointer 单例，避免每次任务都重新建连+跑 migration
     checkpointer = await get_checkpointer()
-    agent = _build_main_agent(time_context, checkpointer=checkpointer)
+
+    # 查询自定义提示词模板（用户级 > 组级 > 默认 YAML）
+    custom_prompt = await _get_custom_system_prompt(user_id or "", group_id)
+    if custom_prompt:
+        logger.info("使用自定义提示词模板", session_id=session_id, prompt_length=len(custom_prompt))
+
+    agent = _build_main_agent(time_context, checkpointer=checkpointer, custom_system_prompt=custom_prompt)
 
     # 工作环境指令是运行时动态补充的，约束模型只在当前会话目录读写文件
     path_instruction = f"""
@@ -384,44 +437,54 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     try:
         # astream 会持续产出模型节点、工具节点和子智能体节点的状态片段
         # 使用 _retryable_astream 包装，网络异常时自动重试
-        async for chunk in _retryable_astream(
-            agent,
-            {"messages": [{"role": "user", "content": full_query}]},
-            config=config,
-        ):
-            # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
-            for node_name, state in chunk.items():
-                if not state or "messages" not in state:
-                    continue
-                messages = state["messages"]
-                if messages and isinstance(messages, list):
-                    last_msg = messages[-1]
-                    if node_name == "model":
-                        if last_msg.tool_calls:
-                            # DeepAgents 调用子智能体时，本质上会产生名为 task 的工具调用
-                            for tool_call in last_msg.tool_calls:
-                                if tool_call["name"] == "task":
-                                    # 子智能体调用单独上报，前端可以展示"正在调用哪个专家助手"
-                                    monitor.report_assistant(
-                                        tool_call["args"]["subagent_type"],
-                                        {
-                                            "description": tool_call["args"][
-                                                "description"
-                                            ]
-                                        },
-                                    )
-                        elif last_msg.content:
-                            # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
-                            content = last_msg.content
-                            # 流式推送部分内容，前端增量渲染
-                            if isinstance(content, str) and len(content) > 0:
-                                monitor.report_streaming_content(content)
-                            logger.info("主智能体执行结果", result_preview=content[:100])
-                            monitor.report_task_result(content)
-                            # 持久化 assistant 消息
-                            asyncio.create_task(_persist_message(
-                                session_id, "assistant", content
-                            ))
+
+        # 链路追踪：为核心 Agent 执行创建子 span
+        from app.tracing import get_tracer
+        agent_tracer = get_tracer("agent")
+        with agent_tracer.start_as_current_span("agent_execution") as exec_span:
+            exec_span.set_attribute("agent.session_id", session_id)
+            exec_span.set_attribute("agent.query_length", len(task_query))
+            if group_id is not None:
+                exec_span.set_attribute("agent.group_id", group_id)
+
+            async for chunk in _retryable_astream(
+                agent,
+                {"messages": [{"role": "user", "content": full_query}]},
+                config=config,
+            ):
+                # chunk 形如 {"model": {"messages": [...]}}，这里主要关心模型最新消息
+                for node_name, state in chunk.items():
+                    if not state or "messages" not in state:
+                        continue
+                    messages = state["messages"]
+                    if messages and isinstance(messages, list):
+                        last_msg = messages[-1]
+                        if node_name == "model":
+                            if last_msg.tool_calls:
+                                # DeepAgents 调用子智能体时，本质上会产生名为 task 的工具调用
+                                for tool_call in last_msg.tool_calls:
+                                    if tool_call["name"] == "task":
+                                        # 子智能体调用单独上报，前端可以展示"正在调用哪个专家助手"
+                                        monitor.report_assistant(
+                                            tool_call["args"]["subagent_type"],
+                                            {
+                                                "description": tool_call["args"][
+                                                    "description"
+                                                ]
+                                            },
+                                        )
+                            elif last_msg.content:
+                                # 模型没有继续调用工具时，最新文本内容就是本轮可反馈给前端的结果
+                                content = last_msg.content
+                                # 流式推送部分内容，前端增量渲染
+                                if isinstance(content, str) and len(content) > 0:
+                                    monitor.report_streaming_content(content)
+                                logger.info("主智能体执行结果", result_preview=content[:100])
+                                monitor.report_task_result(content)
+                                # 持久化 assistant 消息
+                                asyncio.create_task(_persist_message(
+                                    session_id, "assistant", content
+                                ))
 
     except asyncio.CancelledError:
         monitor.report_task_cancelled()

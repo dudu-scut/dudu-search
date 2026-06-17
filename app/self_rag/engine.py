@@ -485,6 +485,16 @@ class RAGEngine:
         3. RRF 融合排序 → 取 top_k 个 parent_ids
         4. 回填父块文本 → LLM 生成答案
         """
+        from app.tracing import get_tracer
+        tracer = get_tracer("rag")
+        with tracer.start_as_current_span("rag_query") as span:
+            span.set_attribute("rag.kb_name", kb_name)
+            span.set_attribute("rag.question_length", len(question))
+
+            return self._query_inner(kb_name, question, span)
+
+    def _query_inner(self, kb_name: str, question: str, span) -> str:
+        """RAG query 的实际检索逻辑，由 query() 的 tracing span 包裹调用。"""
         collection = self.get_kb(kb_name)
         if collection is None:
             return f"知识库 '{kb_name}' 不存在"
@@ -607,6 +617,8 @@ class RAGEngine:
         )
 
         answer = self._generate_answer(question, context, sources)
+        span.set_attribute("rag.sources_count", len(sources))
+        span.set_attribute("rag.context_fragments", len(parent_texts))
         return answer
 
     def _generate_answer(self, question: str, context: str, sources: list[str]) -> str:

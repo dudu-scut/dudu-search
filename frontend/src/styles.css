@@ -2306,3 +2306,142 @@ html[data-theme="dark"] .new-chat-button {
     transition-duration: 1ms !important;
   }
 }
+
+/* ═══════════════════════════════════════════
+   会话分享只读视图
+   ═══════════════════════════════════════════ */
+
+.shared-session-page {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-page, var(--bg, #f8f6f2));
+  font-family: 'Plus Jakarta Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+}
+
+.shared-session-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg-surface, rgba(255, 253, 250, 0.96));
+  border-bottom: 1px solid var(--border, rgba(74, 143, 216, 0.16));
+  backdrop-filter: blur(12px);
+  padding: 16px 0;
+}
+
+.shared-header-inner {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.shared-label {
+  font-size: 13px;
+  color: var(--text-muted, #78716c);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.shared-title {
+  font-family: 'Fraunces', 'Plus Jakarta Sans', serif;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary, #292524);
+  margin: 4px 0 8px;
+}
+
+.shared-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--text-muted, #78716c);
+}
+
+.shared-status {
+  padding: 1px 8px;
+  border-radius: 6px;
+  background: rgba(74, 143, 216, 0.1);
+  color: var(--accent, #4a8fd8);
+  font-size: 12px;
+}
+
+.shared-messages {
+  flex: 1;
+  max-width: 800px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.shared-message {
+  padding: 16px 20px;
+  border-radius: 14px;
+  line-height: 1.7;
+}
+
+.shared-message--user {
+  background: var(--accent, #4a8fd8);
+  color: #fff;
+  align-self: flex-end;
+  max-width: 80%;
+  border-bottom-right-radius: 4px;
+}
+
+.shared-message--assistant {
+  background: var(--bg-surface, rgba(255, 253, 250, 0.96));
+  border: 1px solid var(--border, rgba(74, 143, 216, 0.16));
+  align-self: flex-start;
+  max-width: 100%;
+}
+
+.shared-message-role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+  opacity: 0.6;
+}
+
+.shared-message-content {
+  font-size: 15px;
+}
+
+.shared-message-content p {
+  margin: 0 0 8px;
+}
+
+.shared-message-content p:last-child {
+  margin-bottom: 0;
+}
+
+.shared-footer {
+  text-align: center;
+  padding: 20px;
+  font-size: 13px;
+  color: var(--text-muted, #78716c);
+  border-top: 1px solid var(--border, rgba(74, 143, 216, 0.16));
+}
+
+/* 深色模式适配 */
+html[data-theme="dark"] .shared-session-header {
+  background: rgba(26, 26, 46, 0.96);
+  border-bottom-color: rgba(90, 157, 232, 0.18);
+}
+
+html[data-theme="dark"] .shared-message--assistant {
+  background: rgba(36, 36, 56, 0.96);
+  border-color: rgba(90, 157, 232, 0.18);
+}
+
+html[data-theme="dark"] .shared-status {
+  background: rgba(90, 157, 232, 0.15);
+  color: #5a9de8;
+}
+
+html[data-theme="dark"] .shared-footer {
+  border-top-color: rgba(90, 157, 232, 0.18);
+}
