@@ -85,6 +85,7 @@ tests/eval/eval_report.json
 
 # Claude Code config
 .claude/
+CLAUDE.md
 
 # Superpowers brainstorming
 .superpowers/
