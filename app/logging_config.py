@@ -35,13 +35,13 @@ def _add_user_id(logger: Any, method_name: str, event_dict: dict) -> dict:
 
 
 def _mask_sensitive(logger: Any, method_name: str, event_dict: dict) -> dict:
-    """脱敏处理器 — 自动屏蔽敏感字段。"""
-    SENSITIVE_KEYS = {
+    """脱敏处理器 — 自动屏蔽敏感字段（模糊匹配）。"""
+    SENSITIVE_PATTERNS = {
         "password", "api_key", "token", "secret", "authorization",
-        "password_hash", "access_token", "refresh_token",
     }
     for key in list(event_dict.keys()):
-        if key.lower() in SENSITIVE_KEYS:
+        key_lower = key.lower()
+        if any(pattern in key_lower for pattern in SENSITIVE_PATTERNS):
             event_dict[key] = "****"
     return event_dict
 

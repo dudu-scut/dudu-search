@@ -16,6 +16,7 @@ async def cleanup_expired_sessions():
 
     pool = await get_pool()
     async with pool.acquire() as conn:
+      async with conn.transaction():
         result = await conn.execute(
             """
             DELETE FROM sessions

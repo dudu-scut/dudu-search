@@ -940,6 +940,7 @@ def generate_download_url(file_path: str, user_id: str) -> str:
 
     前端调用此函数获取安全的临时下载链接。
     """
+    import urllib.parse
     expires = int(time.time()) + 3600
     token = create_access_token(
         user_id=user_id,
@@ -947,7 +948,8 @@ def generate_download_url(file_path: str, user_id: str) -> str:
         role="user",
         expires_delta=timedelta(hours=1),
     )
-    return f"/api/download?path={file_path}&token={token}&expires={expires}"
+    encoded_path = urllib.parse.quote(file_path, safe="/")
+    return f"/api/download?path={encoded_path}&token={token}&expires={expires}"
 
 
 @app.get("/api/files")

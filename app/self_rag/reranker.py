@@ -80,7 +80,7 @@ class Reranker:
         if model is None:
             return candidates[: self.TOP_K_OUTPUT]
 
-        limited = candidates[: self.TOP_K_INPUT]
+        limited = [dict(c) for c in candidates[: self.TOP_K_INPUT]]
 
         try:
             pairs = [(query, c["text"]) for c in limited]

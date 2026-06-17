@@ -55,6 +55,7 @@ async def init_schema() -> None:
     """初始化数据库表结构（幂等，使用 IF NOT EXISTS）。"""
     pool = await get_pool()
     async with pool.acquire() as conn:
+      async with conn.transaction():
         # 启用 pgvector 扩展
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector;")
 

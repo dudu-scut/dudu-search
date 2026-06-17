@@ -43,6 +43,8 @@ class OIDCClient:
             raise RuntimeError("OIDC not configured")
 
         issuer = settings.OIDC_ISSUER.rstrip("/")
+        if not issuer.startswith("https://") and "localhost" not in issuer and "127.0.0.1" not in issuer:
+            raise ValueError(f"OIDC issuer URL 必须使用 HTTPS，当前值: {issuer}")
         discovery_url = f"{issuer}/.well-known/openid-configuration"
 
         if cls._http is None:
