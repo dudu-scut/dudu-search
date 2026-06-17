@@ -104,11 +104,10 @@ export default function SessionList({ activeThreadId, onSelect, onNewSession }: 
           locale={{ emptyText: "暂无历史会话" }}
           renderItem={(item) => (
             <List.Item
+              className={`session-item ${item.thread_id === activeThreadId ? "session-item--active" : ""}`}
               style={{
                 padding: "6px 12px",
                 cursor: "pointer",
-                background:
-                  item.thread_id === activeThreadId ? "#e6f4ff" : undefined,
               }}
               onClick={() => onSelect(item.thread_id)}
               actions={[

@@ -392,17 +392,7 @@ function AuthenticatedApp() {
 
         <section className="chat-stream-panel" ref={streamRef}>
           {session.isViewingHistory && (
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-                padding: "8px 16px",
-                background: "#fff7e6",
-                borderBottom: "1px solid #ffd591",
-                marginBottom: 8,
-              }}
-            >
+            <div className="history-session-banner">
               <span>
                 📖 正在查看历史会话：<strong>{session.viewingSessionTitle}</strong>
                 {session.isLoadingHistory ? " (加载中...)" : ""}
