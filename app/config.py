@@ -159,6 +159,11 @@ def _validate_required(s: Settings) -> None:
     if not s.TAVILY_API_KEY:
         print("[Config] 警告: TAVILY_API_KEY 未设置，网络搜索功能将不可用", file=sys.stderr)
     if s.JWT_SECRET == "change-me-in-production":
+        if not s.DEBUG:
+            raise SystemExit(
+                "[Config] 致命错误: JWT_SECRET 使用默认值，非 DEBUG 模式下必须修改！\n"
+                "  请在 .env 中设置 JWT_SECRET=<随机强密码> 或启用 DEBUG=True"
+            )
         print("[Config] 警告: JWT_SECRET 使用默认值，生产环境请务必修改！", file=sys.stderr)
     if missing:
         raise SystemExit(

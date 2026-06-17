@@ -65,6 +65,16 @@ from app.storage.db import get_pool, init_schema, close_pool
 
 logger = get_logger("server")
 
+
+def _log_task_exception(task: asyncio.Task) -> None:
+    """asyncio Task 异常回调：记录 fire-and-forget 任务中未捕获的异常。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("后台任务异常", error=str(exc), exc_info=(type(exc), exc, exc.__traceback__))
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """
@@ -299,9 +309,13 @@ async def metrics_middleware(request: Request, call_next):
     duration = time.time() - start
 
     path = request.url.path
-    # 泛化路径（将 ID 替换为 {id} 避免指标爆炸）
-    generic_path = re.sub(r'/[a-f0-9\-]{36}', '/{id}', path)
+    # 泛化路径（将 ID 替换为 {id} 避免指标基数爆炸）
+    # 1. UUID（36 位，大小写兼容）
+    generic_path = re.sub(r'/[a-fA-F0-9\-]{36}', '/{id}', path)
+    # 2. 纯数字 ID
     generic_path = re.sub(r'/\d+', '/{id}', generic_path)
+    # 3. 长 hex 字符串（12+ 位，如 thread_id / trace_id）
+    generic_path = re.sub(r'/[a-f0-9]{12,}', '/{id}', generic_path)
 
     HTTP_REQUEST_TOTAL.labels(
         method=request.method,
@@ -431,7 +445,7 @@ async def login(request: Request):
 
     # ── 路径 2: LDAP fallback ──
     if LDAPClient.is_enabled():
-        ldap_user = LDAPClient.authenticate(username, password)
+        ldap_user = await asyncio.to_thread(LDAPClient.authenticate, username, password)
         if ldap_user is not None:
             async with pool.acquire() as conn:
                 existing = await conn.fetchrow(
@@ -589,8 +603,9 @@ def _forget_task(thread_id: str, task: asyncio.Task) -> None:
     """
     if active_tasks.get(thread_id) is task:
         active_tasks.pop(thread_id, None)
-        # 异步从 Redis 移除
-        asyncio.ensure_future(unregister_active_task(thread_id))
+        # 异步从 Redis 移除，添加异常回调防止静默失败
+        _task = asyncio.ensure_future(unregister_active_task(thread_id))
+        _task.add_done_callback(_log_task_exception)
 
 
 @app.post("/api/task")
@@ -665,6 +680,17 @@ async def cancel_task(thread_id: str, request: Request, user: UserInfo = Depends
     1. 任务还在队列中（queued）→ 通过 ARQ abort 从队列移除
     2. 任务已在执行中（running）→ 设置 Redis 取消信号，Worker 定期检查
     """
+    # ── 所有权校验：非本人且非管理员不得取消他人任务 ──
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT user_id FROM sessions WHERE thread_id = $1", thread_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在或已结束")
+    if not user.is_admin and str(row["user_id"]) != str(user.id):
+        raise PermissionDeniedError("无权取消此任务：该任务属于其他用户")
+
     from app.storage.redis_client import get_redis_client
     redis = await get_redis_client()
 
@@ -884,16 +910,16 @@ async def download_file(
     文件下载接口 (File Download)。
 
     目标：
-    1. 根据绝对路径下载文件。
+    1. 根据相对路径（相对于 output 目录）下载文件。
     2. 严格的安全检查，防止越权访问。
 
     Args:
-        path (str): 文件的绝对路径 (通常从 list_files 接口获取)。
+        path (str): 文件相对于 output 目录的路径 (由 list_files 接口返回)。
     """
     try:
-        # resolve 后再做 is_relative_to，防止 `../` 之类的路径穿越到 output 之外
-        abs_path = Path(path).resolve()
+        # 将相对路径拼接到 output 目录下，resolve 后做 is_relative_to 防止 `../` 穿越
         output_abs = output_dir.resolve()
+        abs_path = (output_abs / path).resolve()
 
         if not abs_path.is_relative_to(output_abs):
             raise PermissionDeniedError("拒绝访问: 只能下载输出目录下的文件")
@@ -965,7 +991,7 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
                     {
                         "name": file_path.name,
                         "type": "file",
-                        "path": str(file_path),
+                        "path": str(file_path.relative_to(output_abs)),
                         "size": stat.st_size,
                         "mtime": stat.st_mtime,
                     }
@@ -991,6 +1017,44 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     只需要按 thread_id 查找连接，就能把进度推给对应页面。
     """
     logger.info("WebSocket 连接请求", thread_id=thread_id)
+
+    # ── WebSocket 认证：通过 query 参数传递 token ──
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4401, reason="Missing token")
+        return
+    try:
+        payload = decode_token(token)
+        ws_user_id = payload.get("sub", "")
+    except Exception:
+        await websocket.close(code=4401, reason="Invalid or expired token")
+        return
+
+    # 会话所有权校验：确保连接者是该会话的拥有者或管理员
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id FROM sessions WHERE thread_id = $1", thread_id
+            )
+        if row:
+            session_owner = str(row["user_id"])
+            if session_owner != str(ws_user_id):
+                # 检查是否为管理员
+                try:
+                    user_row = None
+                    async with pool.acquire() as conn:
+                        user_row = await conn.fetchrow(
+                            "SELECT role FROM users WHERE id = $1", ws_user_id
+                        )
+                    if not user_row or user_row["role"] != "admin":
+                        await websocket.close(code=4403, reason="Forbidden")
+                        return
+                except Exception:
+                    await websocket.close(code=4403, reason="Forbidden")
+                    return
+    except Exception:
+        pass  # DB 查询失败时不阻塞连接，但记录日志
 
     # 先接受连接
     await websocket.accept()
@@ -1102,7 +1166,7 @@ async def list_sessions(
 ):
     """列出历史会话（按开始时间倒序），仅返回本组数据。"""
     try:
-        group_id, group_filter = get_group_filter(user)
+        group_id, group_suffix = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
             # 构建参数列表：group_id（非管理员时） + limit + offset
@@ -1116,7 +1180,7 @@ async def list_sessions(
                           COUNT(m.id) AS message_count
                    FROM sessions s
                    LEFT JOIN messages m ON s.thread_id = m.thread_id
-                   WHERE {group_filter}
+                   WHERE {group_suffix(params)}
                    GROUP BY s.thread_id, s.title, s.status, s.started_at, s.completed_at
                    ORDER BY s.started_at DESC
                    LIMIT ${len(params) - 1} OFFSET ${len(params)}""",
@@ -1144,14 +1208,14 @@ async def get_session_detail(
 ):
     """获取单个会话详情，包含消息历史和事件。非本组会话不可见。"""
     try:
-        group_id, group_filter = get_group_filter(user)
+        group_id, group_suffix = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
             # 会话基本信息（带组过滤）
             params = [thread_id]
             if group_id is not None:
                 params.append(group_id)
-                group_clause = f"AND s.{group_filter.replace('$1', f'${len(params)}')}"
+                group_clause = f"AND {group_suffix([thread_id])}"
             else:
                 group_clause = ""
 
@@ -1216,13 +1280,13 @@ async def delete_session(
 ):
     """删除指定会话及其关联数据。非本组会话不可删除。"""
     try:
-        group_id, group_filter = get_group_filter(user)
+        group_id, group_suffix = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
             params = [thread_id]
             if group_id is not None:
                 params.append(group_id)
-                group_clause = f"AND {group_filter.replace('$1', f'${len(params)}')}"
+                group_clause = f"AND {group_suffix([thread_id])}"
             else:
                 group_clause = ""
 
@@ -1252,28 +1316,49 @@ async def list_memories(
     offset: int = 0,
     user: UserInfo = Depends(get_current_user),
 ):
-    """列出长期记忆。"""
+    """列出长期记忆（按用户隔离，管理员可查看全部）。"""
     try:
         pool = await get_pool()
+        user_id_str = str(user.id)
         async with pool.acquire() as conn:
-            if memory_type:
+            if user.is_admin and memory_type:
                 rows = await conn.fetch(
                     """SELECT id, memory_type, content, importance, access_count,
-                               last_accessed, source_thread_id, created_at
+                              last_accessed, source_thread_id, created_at
                        FROM long_term_memories
                        WHERE memory_type = $1
                        ORDER BY created_at DESC
                        LIMIT $2 OFFSET $3""",
                     memory_type, limit, offset,
                 )
-            else:
+            elif user.is_admin:
                 rows = await conn.fetch(
                     """SELECT id, memory_type, content, importance, access_count,
-                               last_accessed, source_thread_id, created_at
+                              last_accessed, source_thread_id, created_at
                        FROM long_term_memories
                        ORDER BY created_at DESC
                        LIMIT $1 OFFSET $2""",
                     limit, offset,
+                )
+            elif memory_type:
+                rows = await conn.fetch(
+                    """SELECT id, memory_type, content, importance, access_count,
+                              last_accessed, source_thread_id, created_at
+                       FROM long_term_memories
+                       WHERE memory_type = $1 AND user_id = $2
+                       ORDER BY created_at DESC
+                       LIMIT $3 OFFSET $4""",
+                    memory_type, user_id_str, limit, offset,
+                )
+            else:
+                rows = await conn.fetch(
+                    """SELECT id, memory_type, content, importance, access_count,
+                              last_accessed, source_thread_id, created_at
+                       FROM long_term_memories
+                       WHERE user_id = $1
+                       ORDER BY created_at DESC
+                       LIMIT $2 OFFSET $3""",
+                    user_id_str, limit, offset,
                 )
             memories = [
                 {
@@ -1298,15 +1383,21 @@ async def delete_memory(
     memory_id: str,
     user: UserInfo = Depends(get_current_user),
 ):
-    """删除指定记忆。"""
+    """删除指定记忆（按用户隔离，管理员可删除任意记忆）。"""
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            result = await conn.execute(
-                "DELETE FROM long_term_memories WHERE id = $1::uuid", memory_id
-            )
+            if user.is_admin:
+                result = await conn.execute(
+                    "DELETE FROM long_term_memories WHERE id = $1::uuid", memory_id
+                )
+            else:
+                result = await conn.execute(
+                    "DELETE FROM long_term_memories WHERE id = $1::uuid AND user_id = $2",
+                    memory_id, str(user.id),
+                )
             if result == "DELETE 0":
-                raise HTTPException(status_code=404, detail="记忆不存在")
+                raise HTTPException(status_code=404, detail="记忆不存在或无权删除")
             return {"status": "deleted", "id": memory_id}
     except HTTPException:
         raise
@@ -1326,6 +1417,7 @@ async def create_memory(
         content=request.content,
         memory_type=request.memory_type,
         importance=request.importance,
+        user_id=str(user.id),
     )
     if not memory_id:
         raise HTTPException(status_code=500, detail="记忆创建失败")

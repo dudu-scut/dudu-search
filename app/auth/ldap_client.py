@@ -41,6 +41,7 @@ class LDAPClient:
 
         try:
             from ldap3 import Server, Connection, Tls
+            from ldap3.utils.conv import escape_filter_chars
 
             use_tls = settings.LDAP_USE_TLS
             server = Server(
@@ -74,9 +75,10 @@ class LDAPClient:
                         else settings.LDAP_BASE_DN
                     )
                     attrs = [settings.LDAP_EMAIL_ATTR] if settings.LDAP_EMAIL_ATTR else []
+                    safe_username = escape_filter_chars(username)
                     if conn.search(
                         search_base=search_dn,
-                        search_filter=f"({settings.LDAP_USERNAME_ATTR}={username})",
+                        search_filter=f"({settings.LDAP_USERNAME_ATTR}={safe_username})",
                         attributes=attrs,
                         size_limit=1,
                         time_limit=3,

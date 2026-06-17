@@ -14,7 +14,15 @@ from app.logging_config import get_logger
 logger = get_logger("db")
 
 _pool: asyncpg.Pool | None = None
-_lock = asyncio.Lock()
+_lock: asyncio.Lock | None = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """懒初始化 Lock，避免模块加载时在事件循环外创建。"""
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
 
 
 async def get_pool() -> asyncpg.Pool:
@@ -22,7 +30,7 @@ async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is not None:
         return _pool
-    async with _lock:
+    async with _get_lock():
         if _pool is not None:
             return _pool
         _pool = await asyncpg.create_pool(
@@ -35,11 +43,12 @@ async def get_pool() -> asyncpg.Pool:
 
 
 async def close_pool() -> None:
-    """关闭连接池。"""
+    """关闭连接池（加锁防止与 get_pool 竞态）。"""
     global _pool
-    if _pool is not None:
-        await _pool.close()
-        _pool = None
+    async with _get_lock():
+        if _pool is not None:
+            await _pool.close()
+            _pool = None
 
 
 async def init_schema() -> None:
@@ -106,6 +115,7 @@ async def init_schema() -> None:
                 content TEXT NOT NULL,
                 embedding vector(512),
                 source_thread_id VARCHAR(64),
+                user_id VARCHAR(64),
                 importance FLOAT DEFAULT 0.5,
                 access_count INTEGER DEFAULT 0,
                 last_accessed TIMESTAMPTZ,
@@ -153,6 +163,15 @@ async def init_schema() -> None:
         """)
         await conn.execute("""
             ALTER TABLE sessions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
+        """)
+
+        # 迁移：为长期记忆表添加用户隔离列（幂等）
+        await conn.execute("""
+            ALTER TABLE long_term_memories ADD COLUMN IF NOT EXISTS user_id VARCHAR(64);
+        """)
+        await conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_memories_user_id
+            ON long_term_memories(user_id);
         """)
 
         # 用户组表

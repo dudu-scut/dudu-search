@@ -63,6 +63,7 @@ QUERY_PROCESSOR_TIMEOUT = int(os.getenv("SELF_RAG_QUERY_PROCESSOR_TIMEOUT", "5")
 ITERATIVE_RETRIEVAL_ENABLED = os.getenv("SELF_RAG_ITERATIVE", "true").lower() != "false"
 ITERATIVE_MAX_ROUNDS = int(os.getenv("SELF_RAG_ITERATIVE_MAX_ROUNDS", "3"))
 ITERATIVE_SUFFICIENCY_MIN_SCORE = int(os.getenv("SELF_RAG_ITERATIVE_MIN_SCORE", "3"))
+ITERATIVE_OVERALL_TIMEOUT = int(os.getenv("SELF_RAG_ITERATIVE_TIMEOUT", "60"))
 
 # ── Phase 4: Knowledge Graph ──
 KG_ENABLED = os.getenv("SELF_RAG_KG_ENABLED", "false").lower() == "true"

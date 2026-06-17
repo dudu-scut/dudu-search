@@ -5,6 +5,7 @@
 - 中期记忆：会话结束后自动摘要
 - 长期记忆：跨会话事实提取 + pgvector 语义检索
 """
+import asyncio
 import json
 import re
 from datetime import datetime, timezone, timedelta
@@ -24,19 +25,31 @@ class MemoryService:
 
     def __init__(self):
         self._embedding_model = None
+        self._embedding_lock: Optional[asyncio.Lock] = None
 
-    def _get_embedding_model(self):
-        """懒加载 embedding 模型（复用 RAG 基础设施）。"""
-        if self._embedding_model is None:
+    def _get_embedding_lock(self) -> asyncio.Lock:
+        """懒初始化 Lock，避免在事件循环外创建。"""
+        if self._embedding_lock is None:
+            self._embedding_lock = asyncio.Lock()
+        return self._embedding_lock
+
+    async def _get_embedding_model(self):
+        """懒加载 embedding 模型（双重检查锁，防止并发初始化泄漏 ~500MB）。"""
+        if self._embedding_model is not None:
+            return self._embedding_model
+        async with self._get_embedding_lock():
+            if self._embedding_model is not None:
+                return self._embedding_model
             from sentence_transformers import SentenceTransformer
             model_name = settings.EMBEDDING_MODEL
-            self._embedding_model = SentenceTransformer(model_name)
-        return self._embedding_model
+            self._embedding_model = await asyncio.to_thread(
+                SentenceTransformer, model_name
+            )
+            return self._embedding_model
 
     async def _embed(self, text: str) -> list[float]:
         """将文本转换为向量（在 executor 中运行，不阻塞事件循环）。"""
-        import asyncio
-        model = self._get_embedding_model()
+        model = await self._get_embedding_model()
         loop = asyncio.get_running_loop()
         embedding = await loop.run_in_executor(None, model.encode, text)
         return embedding.tolist()
@@ -48,25 +61,43 @@ class MemoryService:
         query: str,
         top_k: int = 5,
         threshold: float = 0.6,
+        user_id: str | None = None,
     ) -> list[dict]:
-        """语义检索最相关的长期记忆。"""
+        """语义检索最相关的长期记忆（按用户隔离）。"""
         try:
             query_embedding = await self._embed(query)
             from app.storage.db import get_pool
             pool = await get_pool()
             async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """SELECT id, memory_type, content, importance,
-                              1 - (embedding <=> $1) AS similarity
-                       FROM long_term_memories
-                       WHERE embedding IS NOT NULL
-                         AND 1 - (embedding <=> $1) > $3
-                       ORDER BY similarity DESC
-                       LIMIT $2""",
-                    json.dumps(query_embedding),
-                    top_k,
-                    threshold,
-                )
+                if user_id:
+                    rows = await conn.fetch(
+                        """SELECT id, memory_type, content, importance,
+                                  1 - (embedding <=> $1) AS similarity
+                           FROM long_term_memories
+                           WHERE embedding IS NOT NULL
+                             AND user_id = $4
+                             AND 1 - (embedding <=> $1) > $3
+                           ORDER BY similarity DESC
+                           LIMIT $2""",
+                        json.dumps(query_embedding),
+                        top_k,
+                        threshold,
+                        user_id,
+                    )
+                else:
+                    # 无 user_id 时回退到全局查询（兼容旧数据/系统级调用）
+                    rows = await conn.fetch(
+                        """SELECT id, memory_type, content, importance,
+                                  1 - (embedding <=> $1) AS similarity
+                           FROM long_term_memories
+                           WHERE embedding IS NOT NULL
+                             AND 1 - (embedding <=> $1) > $3
+                           ORDER BY similarity DESC
+                           LIMIT $2""",
+                        json.dumps(query_embedding),
+                        top_k,
+                        threshold,
+                    )
                 return [
                     {
                         "id": str(row["id"]),
@@ -81,20 +112,32 @@ class MemoryService:
             logger.warning("检索失败", exc_info=True)
             return []
 
-    async def retrieve_recent_summaries(self, limit: int = 3) -> list[dict]:
-        """获取最近会话摘要。"""
+    async def retrieve_recent_summaries(self, limit: int = 3, user_id: str | None = None) -> list[dict]:
+        """获取最近会话摘要（按用户隔离）。"""
         try:
             from app.storage.db import get_pool
             pool = await get_pool()
             async with pool.acquire() as conn:
-                rows = await conn.fetch(
-                    """SELECT thread_id, title, summary, started_at
-                       FROM sessions
-                       WHERE summary IS NOT NULL
-                       ORDER BY started_at DESC
-                       LIMIT $1""",
-                    limit,
-                )
+                if user_id:
+                    rows = await conn.fetch(
+                        """SELECT thread_id, title, summary, started_at
+                           FROM sessions
+                           WHERE summary IS NOT NULL
+                             AND user_id = $2
+                           ORDER BY started_at DESC
+                           LIMIT $1""",
+                        limit,
+                        user_id,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        """SELECT thread_id, title, summary, started_at
+                           FROM sessions
+                           WHERE summary IS NOT NULL
+                           ORDER BY started_at DESC
+                           LIMIT $1""",
+                        limit,
+                    )
                 return [
                     {
                         "thread_id": row["thread_id"],
@@ -110,12 +153,12 @@ class MemoryService:
 
     # ---- 上下文构建 ----
 
-    async def build_context(self, thread_id: str, user_message: str) -> str:
+    async def build_context(self, thread_id: str, user_message: str, user_id: str | None = None) -> str:
         """为新对话构建记忆上下文块，注入 Agent 系统提示词。"""
         parts = []
 
         # 1. 相关长期记忆
-        relevant = await self.retrieve_relevant(user_message, top_k=5)
+        relevant = await self.retrieve_relevant(user_message, top_k=5, user_id=user_id)
         if relevant:
             lines = ["## 相关历史记忆"]
             type_label_map = {
@@ -128,7 +171,7 @@ class MemoryService:
             parts.append("\n".join(lines))
 
         # 2. 近期会话摘要
-        recent = await self.retrieve_recent_summaries(limit=3)
+        recent = await self.retrieve_recent_summaries(limit=3, user_id=user_id)
         if recent:
             lines = ["## 近期对话摘要"]
             for s in recent:
@@ -148,8 +191,9 @@ class MemoryService:
         importance: float = 0.5,
         source_thread_id: str | None = None,
         metadata: dict | None = None,
+        user_id: str | None = None,
     ) -> str | None:
-        """存储一条长期记忆（含向量嵌入）。"""
+        """存储一条长期记忆（含向量嵌入，按用户隔离）。"""
         try:
             embedding = await self._embed(content)
             from app.storage.db import get_pool
@@ -157,8 +201,8 @@ class MemoryService:
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
                     """INSERT INTO long_term_memories
-                       (memory_type, content, embedding, source_thread_id, importance, metadata)
-                       VALUES ($1, $2, $3, $4, $5, $6)
+                       (memory_type, content, embedding, source_thread_id, importance, metadata, user_id)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7)
                        RETURNING id""",
                     memory_type,
                     content,
@@ -166,6 +210,7 @@ class MemoryService:
                     source_thread_id,
                     importance,
                     json.dumps(metadata or {}, ensure_ascii=False),
+                    user_id,
                 )
                 return str(row["id"]) if row else None
         except Exception as e:
@@ -189,6 +234,12 @@ class MemoryService:
                     "WHERE thread_id = $1 ORDER BY created_at ASC",
                     thread_id,
                 )
+                # 查询会话所属用户，用于记忆隔离
+                session_row = await conn.fetchrow(
+                    "SELECT user_id FROM sessions WHERE thread_id = $1",
+                    thread_id,
+                )
+                session_user_id = session_row["user_id"] if session_row else None
 
             if not rows:
                 return {"summary": "", "facts": [], "title": ""}
@@ -208,7 +259,7 @@ class MemoryService:
                         summary, title, thread_id,
                     )
 
-            # 存储提取的事实到长期记忆
+            # 存储提取的事实到长期记忆（关联用户 ID 以实现隔离）
             for fact in facts:
                 await self.store_memory(
                     content=fact.get("content", ""),
@@ -216,6 +267,7 @@ class MemoryService:
                     importance=fact.get("importance", 0.5),
                     source_thread_id=thread_id,
                     metadata=fact.get("metadata", {}),
+                    user_id=session_user_id,
                 )
 
             return {"summary": summary or "", "title": title or "", "facts": facts}
@@ -272,10 +324,11 @@ class MemoryService:
         try:
             response = await model.ainvoke(prompt)
             text = response.content if hasattr(response, "content") else str(response)
-            # 提取 JSON 块
-            match = re.search(r"\{[\s\S]*\}", text)
-            if match:
-                result = json.loads(match.group())
+            # 提取 JSON 块：从首个 { 开始用 raw_decode 精确解析
+            brace_idx = text.find("{")
+            if brace_idx >= 0:
+                decoder = json.JSONDecoder()
+                result, _ = decoder.raw_decode(text, brace_idx)
                 return (
                     result.get("title"),
                     result.get("summary"),

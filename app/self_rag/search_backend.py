@@ -66,17 +66,23 @@ class BM25Backend(SearchBackend):
         self._model: BM25Okapi | None = None
         self._doc_store: dict[str, tuple[list[str], dict]] = {}
         # doc_id → (tokenized_text, metadata)
+        self._dirty: bool = False  # 延迟重建标志：add/remove 后标记，search 时才重建
 
     def add(self, doc_id: str, text: str, metadata: dict | None = None) -> None:
         tokens = self._tokenizer(text)
         self._doc_store[doc_id] = (tokens, metadata or {})
-        self._rebuild_if_needed()
+        self._dirty = True
 
     def remove(self, doc_id: str) -> None:
         self._doc_store.pop(doc_id, None)
-        self._rebuild_if_needed()
+        self._dirty = True
 
     def search(self, query: str, top_k: int) -> list[tuple[str, float]]:
+        # 延迟重建：只在 search 时才检查并重建 BM25 索引
+        if self._dirty:
+            self._rebuild_if_needed()
+            self._dirty = False
+
         if self._model is None:
             return []
 
@@ -103,6 +109,7 @@ class BM25Backend(SearchBackend):
     def clear(self) -> None:
         self._doc_store.clear()
         self._model = None
+        self._dirty = False
 
     def size(self) -> int:
         return len(self._doc_store)

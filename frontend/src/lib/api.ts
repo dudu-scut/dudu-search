@@ -1,5 +1,5 @@
 import { API_BASE_URL } from "./config";
-import { getToken } from "./auth";
+import { clearToken, getToken } from "./auth";
 import type { CancelTaskResponse, FileListResponse, SessionDetail, SessionListResponse, TaskResponse, UploadResponse } from "../types";
 
 function apiUrl(path: string): string {
@@ -23,6 +23,10 @@ async function requestJson<T>(input: RequestInfo | URL, init?: RequestInit): Pro
     : await response.text();
 
   if (!response.ok) {
+    if (response.status === 401) {
+      clearToken();
+      window.dispatchEvent(new Event("auth:expired"));
+    }
     const message =
       typeof payload === "object" && payload && "detail" in payload
         ? String(payload.detail)

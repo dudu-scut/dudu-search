@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cancelTask, deleteUploadedFile, getSessionDetail, listSessionFiles, startTask, uploadSessionFiles } from "../lib/api";
+import { getToken } from "../lib/auth";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
 import type {
@@ -90,7 +91,7 @@ export function useDeepAgentSession() {
       socketRef.current?.close();
       setConnectionState(hadSocket ? "reconnecting" : "connecting");
 
-      const socket = new WebSocket(`${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}`);
+      const socket = new WebSocket(`${WS_BASE_URL}/ws/${encodeURIComponent(threadId)}?token=${encodeURIComponent(getToken() || "")}`);
       socketRef.current = socket;
 
       socket.onopen = () => {

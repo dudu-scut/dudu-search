@@ -28,6 +28,7 @@ from app.agent.subagents.database_query_agent import database_query_agent
 from app.agent.subagents.knowledge_base_agent import knowledge_base_agent
 from app.agent.subagents.network_search_agent import network_search_agent
 from app.api.context import (
+    get_current_user_id,
     reset_session_context,
     set_current_group_id,
     set_session_context,
@@ -255,7 +256,8 @@ async def _fetch_memory_context(thread_id: str, user_message: str) -> str:
     """异步获取记忆上下文，独立函数便于并行调度。"""
     try:
         memory_service = get_memory_service()
-        return await memory_service.build_context(thread_id, user_message)
+        user_id = get_current_user_id()
+        return await memory_service.build_context(thread_id, user_message, user_id=user_id)
     except Exception:
         logger.warning("记忆上下文获取失败", exc_info=True)
         return ""

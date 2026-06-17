@@ -13,7 +13,15 @@ from app.config import settings
 REDIS_URI = settings.REDIS_URI
 
 _client: Optional[aioredis.Redis] = None
-_lock = asyncio.Lock()
+_lock: Optional[asyncio.Lock] = None
+
+
+def _get_lock() -> asyncio.Lock:
+    """懒初始化 Lock，避免模块加载时在事件循环外创建。"""
+    global _lock
+    if _lock is None:
+        _lock = asyncio.Lock()
+    return _lock
 
 
 async def get_redis() -> aioredis.Redis:
@@ -21,7 +29,7 @@ async def get_redis() -> aioredis.Redis:
     global _client
     if _client is not None:
         return _client
-    async with _lock:
+    async with _get_lock():
         if _client is not None:
             return _client
         _client = aioredis.from_url(REDIS_URI, decode_responses=True)
@@ -33,11 +41,12 @@ get_redis_client = get_redis
 
 
 async def close_redis() -> None:
-    """关闭 Redis 连接。"""
+    """关闭 Redis 连接（加锁防止与 get_redis 竞态）。"""
     global _client
-    if _client is not None:
-        await _client.close()
-        _client = None
+    async with _get_lock():
+        if _client is not None:
+            await _client.close()
+            _client = None
 
 
 # ---- 热状态辅助操作 ----
@@ -113,18 +122,32 @@ async def publish_ws_event(thread_id: str, event_json: str) -> None:
     await r.publish(_ws_channel(thread_id), event_json)
 
 
+async def _create_pubsub_connection() -> aioredis.Redis:
+    """为 Pub/Sub 创建独立 Redis 连接，避免与共享 _client 互相干扰。
+
+    Pub/Sub 模式下多个订阅者共享同一连接会导致消息路由混乱，
+    每个订阅者应使用独立连接。
+    """
+    return aioredis.from_url(REDIS_URI, decode_responses=True)
+
+
 async def subscribe_ws_events(thread_id: str):
     """订阅指定 thread_id 的 WebSocket 事件频道，返回异步生成器。
 
     Server 进程的 WebSocket 端点使用此生成器获取 Worker 推送的实时事件。
+    每次调用创建独立 Redis 连接，退出时自动清理。
+
     用法:
         async for event_json in subscribe_ws_events(thread_id):
             ...
     """
-    r = await get_redis()
-    async with r.pubsub() as pubsub:
-        channel = _ws_channel(thread_id)
-        await pubsub.subscribe(channel)
-        async for message in pubsub.listen():
-            if message["type"] == "message":
-                yield message["data"]
+    conn = await _create_pubsub_connection()
+    try:
+        async with conn.pubsub() as pubsub:
+            channel = _ws_channel(thread_id)
+            await pubsub.subscribe(channel)
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield message["data"]
+    finally:
+        await conn.close()

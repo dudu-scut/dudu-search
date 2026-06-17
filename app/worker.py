@@ -34,7 +34,14 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
         user_id: 用户 UUID
         group_id: 用户组 ID
     """
-    from app.api.context import generate_trace_id, set_current_user_id, set_current_group_id, set_session_context
+    from app.api.context import (
+        generate_trace_id,
+        reset_worker_context,
+        set_current_group_id,
+        set_current_user_id,
+        set_session_context,
+        set_thread_context,
+    )
     from app.storage.db import get_pool
     from app.logging_config import get_logger
     from app.metrics import ACTIVE_TASKS, TASK_DURATION, TASK_TOTAL
@@ -42,11 +49,19 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
     task_logger = get_logger("agent_task").bind(thread_id=thread_id)
     task_logger.info("任务开始执行", query=query[:100])
 
-    # 设置上下文
-    generate_trace_id()
-    set_current_user_id(user_id)
-    set_current_group_id(group_id)
-    set_session_context(thread_id)
+    # 设置上下文并保存 token，finally 中统一 reset 防止跨任务泄漏
+    _, trace_token = generate_trace_id()
+    user_token = set_current_user_id(user_id)
+    group_token = set_current_group_id(group_id)
+    session_token = set_session_context(thread_id)
+    thread_token = set_thread_context(thread_id)
+    ctx_tokens = {
+        "trace_id": trace_token,
+        "user_id": user_token,
+        "group_id": group_token,
+        "session_dir": session_token,
+        "thread_id": thread_token,
+    }
 
     import asyncio as _asyncio
 
@@ -166,6 +181,8 @@ async def run_agent_task(ctx, query: str, thread_id: str, user_id: str, group_id
                 await redis.delete(f"task_job:{thread_id}")
             except Exception:
                 pass
+            # 重置所有 ContextVar，防止跨任务上下文泄漏
+            reset_worker_context(ctx_tokens)
 
 
 # ── ARQ Worker 配置 ──

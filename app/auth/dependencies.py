@@ -12,10 +12,12 @@ class UserInfo:
     """从 JWT 解析出的用户信息。"""
 
     def __init__(self, payload: dict):
-        self.id: str = payload["sub"]
-        self.username: str = payload["username"]
+        self.id: str = payload.get("sub") or ""
+        self.username: str = payload.get("username") or ""
         self.role: str = payload.get("role", "user")
         self.group_id: Optional[int] = payload.get("group_id")
+        if not self.id:
+            raise AuthError("无效的认证 token: 缺少用户标识")
 
     @property
     def is_admin(self) -> bool:
@@ -65,22 +67,28 @@ async def get_optional_user(
         return None
 
 
-def get_group_filter(user: UserInfo = Depends(get_current_user)) -> Tuple[Optional[int], str]:
-    """返回 (group_id, SQL WHERE clause) 用于数据隔离过滤。
+def get_group_filter(user: UserInfo = Depends(get_current_user)) -> Tuple[Optional[int], callable]:
+    """返回 (group_id, group_suffix) 用于参数化 SQL 数据隔离过滤。
 
-    管理员可以看到所有组的数据。普通用户只能看到自己所在组的数据。
-    如果 group_id 为 None（非管理员但未分配组），默认使用 group_id=1 防止数据泄漏。
+    管理员: group_id=None, group_suffix 返回 "1=1"（无过滤）
+    普通用户: group_id=用户组ID, group_suffix(params) 返回 "group_id = $N"
+              其中 N = len(params) + 1，调用者需将 group_id 追加到 params
 
     用法:
-        group_id, filter_clause = get_group_filter(user)
-        # filter_clause 是完整的 WHERE 子句片段，例如 "group_id = $1" 或 "1=1"
+        group_id, group_suffix = get_group_filter(user)
+        params = [...]
+        if group_id is not None:
+            params.append(group_id)
         results = await conn.fetch(
-            f"SELECT * FROM sessions WHERE {filter_clause}", group_id
+            f"SELECT * FROM sessions WHERE {group_suffix(params)}", *params
         )
     """
     if user.is_admin:
-        return None, "1=1"
-    # 防御性兜底：未分配组的用户默认归入组 1，避免因 group_id=None 导致
-    # server.py 中 `if group_id is not None` 分支跳过，从而绕过组隔离
+        return None, lambda params: "1=1"
+    # 防御性兜底：未分配组的用户默认归入组 1
     gid = user.group_id if user.group_id is not None else 1
-    return gid, "group_id = $1"
+
+    def _suffix(params: list) -> str:
+        return f"group_id = ${len(params) + 1}"
+
+    return gid, _suffix

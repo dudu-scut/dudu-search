@@ -10,12 +10,13 @@ from pathlib import Path
 from typing import Optional
 
 
-def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
+def resolve_path(filename: str, session_dir: Optional[str] = None, updated_dir: Optional[str] = None) -> str:
     """
-    解析文件路径，并尽量把任务产物限制在当前会话目录中
+    解析文件路径，并将任务产物限制在当前会话目录中
 
     :param filename: 模型、工具或用户传入的文件名/路径
     :param session_dir: 当前任务的会话目录
+    :param updated_dir: 上传文件根目录（updated/），用于校验路径沙箱
     :return: 解析后的绝对路径
     """
     path = Path(filename)
@@ -33,7 +34,19 @@ def resolve_path(filename: str, session_dir: Optional[str] = None) -> str:
     if "updated/" in path_str:
         idx = path_str.find("updated/")
         relative_part = path_str[idx:]
-        return str(Path(relative_part).resolve())
+
+        if updated_dir:
+            resolved = (Path(updated_dir) / relative_part[len("updated/"):]).resolve()
+            updated_base = Path(updated_dir).resolve()
+        else:
+            resolved = Path(relative_part).resolve()
+            updated_base = Path("updated").resolve()
+
+        # 沙箱校验：防止 updated/../../etc/passwd 这类路径穿越攻击
+        if not (updated_base in resolved.parents or resolved == updated_base):
+            raise ValueError(f"路径 '{path_str}' 越界，不在上传目录内，操作被拒绝")
+
+        return str(resolved)
 
     if not session_dir:
         return str(path.resolve())

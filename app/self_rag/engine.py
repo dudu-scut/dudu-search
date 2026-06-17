@@ -50,6 +50,23 @@ CN_SEPARATORS = ["\n\n", "\n", "。", ".", "；", ";", "！", "!", "？", "?", "
 class RAGEngine:
     """自建 RAG 引擎单例，封装知识库的增删查改和文档摄入、问答全流程。"""
 
+    # 专用线程池：用于在已有事件循环运行时安全驱动协程
+    _coroutine_executor = None
+
+    @staticmethod
+    def _run_coroutine(coro):
+        """安全运行协程：有运行中循环时在线程池中执行，否则 asyncio.run()。"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(coro)
+        # 循环已在运行（FastAPI 异步上下文），在线程池中创建新循环来驱动
+        if RAGEngine._coroutine_executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+            RAGEngine._coroutine_executor = ThreadPoolExecutor(max_workers=2)
+        future = RAGEngine._coroutine_executor.submit(asyncio.run, coro)
+        return future.result()
+
     def __init__(self):
         os.makedirs(CHROMA_PERSIST_DIR, exist_ok=True)
         os.makedirs(DOC_STORE_DIR, exist_ok=True)
@@ -59,7 +76,7 @@ class RAGEngine:
             path=CHROMA_PERSIST_DIR,
             settings=ChromaSettings(anonymized_telemetry=False),
         )
-        self._llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+        self._llm_client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=30)
 
         # BM25 索引缓存：按知识库名存储 BM25Backend 实例，延迟构建
         self._bm25_backends: dict[str, "BM25Backend"] = {}
@@ -476,12 +493,7 @@ class RAGEngine:
         qp = self._get_query_processor()
         processed = None
         if qp is not None:
-            try:
-                loop = asyncio.get_event_loop()
-            except RuntimeError:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-            processed = loop.run_until_complete(qp.process(question))
+            processed = self._run_coroutine(qp.process(question))
 
         effective_question = processed.expanded if processed else question
 
@@ -559,12 +571,7 @@ class RAGEngine:
                         for pid, doc in zip(top_parent_ids, parent_docs)
                     ]
 
-                    try:
-                        loop = asyncio.get_event_loop()
-                    except RuntimeError:
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                    reranked = loop.run_until_complete(
+                    reranked = self._run_coroutine(
                         reranker.rerank(question, candidates)
                     )
                     top_parent_ids = [c["id"] for c in reranked]

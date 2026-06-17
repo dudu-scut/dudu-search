@@ -62,9 +62,9 @@ def get_thread_context() -> Optional[str]:
     return _thread_id_ctx.get()
 
 
-def set_current_group_id(group_id: int) -> None:
-    """设置当前请求链路的用户组 ID，供知识库工具等深层调用读取。"""
-    _current_group_id.set(group_id)
+def set_current_group_id(group_id: int) -> Token[Optional[int]]:
+    """设置当前请求链路的用户组 ID，供知识库工具等深层调用读取。返回 token 用于 reset。"""
+    return _current_group_id.set(group_id)
 
 
 def get_current_group_id() -> Optional[int]:
@@ -72,11 +72,11 @@ def get_current_group_id() -> Optional[int]:
     return _current_group_id.get()
 
 
-def generate_trace_id() -> str:
-    """生成短 trace_id（12 位 hex），并写入 ContextVar。"""
+def generate_trace_id() -> tuple[str, Token[str]]:
+    """生成短 trace_id（12 位 hex），并写入 ContextVar。返回 (trace_id, token)。"""
     trace_id = uuid.uuid4().hex[:12]
-    _current_trace_id.set(trace_id)
-    return trace_id
+    token = _current_trace_id.set(trace_id)
+    return trace_id, token
 
 
 def get_trace_id() -> str:
@@ -84,14 +84,37 @@ def get_trace_id() -> str:
     return _current_trace_id.get()
 
 
-def set_current_user_id(user_id: str) -> None:
-    """设置当前请求链路的用户 ID，供日志和工具层读取。"""
-    _current_user_id.set(user_id)
+def set_current_user_id(user_id: str) -> Token[str]:
+    """设置当前请求链路的用户 ID，供日志和工具层读取。返回 token 用于 reset。"""
+    return _current_user_id.set(user_id)
 
 
 def get_current_user_id() -> str:
     """获取当前请求链路的用户 ID；未设置时返回空字符串。"""
     return _current_user_id.get()
+
+
+def reset_worker_context(tokens: dict) -> None:
+    """
+    统一重置 Worker 任务设置的所有 ContextVar。
+
+    :param tokens: set_* 返回的 token 字典，键为 ContextVar 名称
+    """
+    for name, token in tokens.items():
+        if token is not None:
+            try:
+                if name == "session_dir":
+                    _session_dir_ctx.reset(token)
+                elif name == "thread_id":
+                    _thread_id_ctx.reset(token)
+                elif name == "group_id":
+                    _current_group_id.reset(token)
+                elif name == "trace_id":
+                    _current_trace_id.reset(token)
+                elif name == "user_id":
+                    _current_user_id.reset(token)
+            except ValueError:
+                pass  # token 已过期或不属于当前上下文，安全忽略
 
 
 def reset_session_context(

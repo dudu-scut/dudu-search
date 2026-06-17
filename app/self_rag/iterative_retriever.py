@@ -15,6 +15,7 @@ from openai import OpenAI
 
 from app.self_rag.config import (
     ITERATIVE_MAX_ROUNDS,
+    ITERATIVE_OVERALL_TIMEOUT,
     ITERATIVE_SUFFICIENCY_MIN_SCORE,
     LLM_API_KEY,
     LLM_BASE_URL,
@@ -81,7 +82,7 @@ class IterativeRetriever:
     @property
     def client(self) -> OpenAI:
         if self._client is None:
-            self._client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY)
+            self._client = OpenAI(base_url=LLM_BASE_URL, api_key=LLM_API_KEY, timeout=30)
         return self._client
 
     async def retrieve_with_judgment(
@@ -106,57 +107,69 @@ class IterativeRetriever:
         all_snippets: list[str] = []
         seen_ids: set[str] = set()
 
-        for round_num in range(1, self._max_rounds + 1):
-            result.rounds = round_num
+        async def _run_loop() -> None:
+            nonlocal current_query
+            for round_num in range(1, self._max_rounds + 1):
+                result.rounds = round_num
 
-            ids = await do_retrieve(current_query)
-            new_ids = [i for i in ids if i not in seen_ids]
-            if new_ids:
-                texts = do_get_texts(new_ids)
-            else:
-                texts = []
+                ids = await do_retrieve(current_query)
+                new_ids = [i for i in ids if i not in seen_ids]
+                if new_ids:
+                    texts = do_get_texts(new_ids)
+                else:
+                    texts = []
 
-            all_ids.extend(new_ids)
-            all_snippets.extend(texts)
-            for i in new_ids:
-                seen_ids.add(i)
+                all_ids.extend(new_ids)
+                all_snippets.extend(texts)
+                for i in new_ids:
+                    seen_ids.add(i)
 
-            try:
-                judgment = await self._judge(query, all_snippets[:10])
-            except Exception:
-                logger.warning("Judge LLM call failed — treating as sufficient", exc_info=True)
-                result.sufficient = True
-                break
-
-            result.retrieval_log.append({
-                "round": round_num,
-                "query": current_query,
-                "new_ids": new_ids,
-                "judgment": judgment,
-            })
-
-            if judgment.get("sufficient", True):
-                result.sufficient = True
-                break
-
-            if round_num < self._max_rounds:
                 try:
-                    current_query = await self._rewrite(
-                        original_query=query,
-                        retrieved_snippets="\n".join(all_snippets[:5]),
-                        reason=judgment.get("reason", ""),
-                        suggestion=judgment.get("rewrite_suggestion", ""),
-                    )
+                    judgment = await self._judge(query, all_snippets[:10])
                 except Exception:
-                    logger.warning("Rewrite LLM call failed", exc_info=True)
-                    result.sufficient = False
+                    logger.warning("Judge LLM call failed — treating as sufficient", exc_info=True)
+                    result.sufficient = True
                     break
-            else:
-                result.sufficient = False
-                logger.info(
-                    "Max rounds reached without sufficient results",
-                    rounds=round_num,
-                )
+
+                result.retrieval_log.append({
+                    "round": round_num,
+                    "query": current_query,
+                    "new_ids": new_ids,
+                    "judgment": judgment,
+                })
+
+                if judgment.get("sufficient", True):
+                    result.sufficient = True
+                    break
+
+                if round_num < self._max_rounds:
+                    try:
+                        current_query = await self._rewrite(
+                            original_query=query,
+                            retrieved_snippets="\n".join(all_snippets[:5]),
+                            reason=judgment.get("reason", ""),
+                            suggestion=judgment.get("rewrite_suggestion", ""),
+                        )
+                    except Exception:
+                        logger.warning("Rewrite LLM call failed", exc_info=True)
+                        result.sufficient = False
+                        break
+                else:
+                    result.sufficient = False
+                    logger.info(
+                        "Max rounds reached without sufficient results",
+                        rounds=round_num,
+                    )
+
+        try:
+            await asyncio.wait_for(_run_loop(), timeout=ITERATIVE_OVERALL_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Iterative retrieval timed out",
+                timeout=ITERATIVE_OVERALL_TIMEOUT,
+                rounds_completed=result.rounds,
+            )
+            result.sufficient = False
 
         result.parent_ids = all_ids
         return result

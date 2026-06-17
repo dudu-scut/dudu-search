@@ -8,6 +8,8 @@ query_knowledge_base 用于向指定知识库发起知识问答。
 所有工具都会从 ContextVar 获取当前用户的 group_id，确保跨组数据隔离。
 """
 
+import asyncio
+
 from app.api.context import get_current_group_id
 from app.api.monitor import monitor
 from app.metrics import TOOL_CALL_DURATION, TOOL_CALL_TOTAL
@@ -48,7 +50,7 @@ def list_knowledge_bases() -> str:
 
 
 @tool
-def query_knowledge_base(kb_name: str, question: str) -> str:
+async def query_knowledge_base(kb_name: str, question: str) -> str:
     """
     向某个自建 RAG 知识库发起一次知识问答
 
@@ -75,7 +77,7 @@ def query_knowledge_base(kb_name: str, question: str) -> str:
             if not engine.check_kb_access(kb_name, group_id):
                 return f"知识库 '{kb_name}' 不属于当前用户组，无权访问。"
 
-            result = engine.query(kb_name=kb_name, question=question)
+            result = await asyncio.to_thread(engine.query, kb_name=kb_name, question=question)
             return result
     except Exception as e:
         return f"知识库提问失败，错误原因：{str(e)}"

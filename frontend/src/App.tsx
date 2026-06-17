@@ -419,6 +419,16 @@ export default function App() {
     if (handleSSOCallback()) return true;
     return isLoggedIn();
   });
+  const { message } = AntApp.useApp();
+
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      setLoggedIn(false);
+      message.warning("登录已过期，请重新登录");
+    };
+    window.addEventListener("auth:expired", handleAuthExpired);
+    return () => window.removeEventListener("auth:expired", handleAuthExpired);
+  }, [message]);
 
   if (!loggedIn) {
     return <LoginPage onLoginSuccess={() => setLoggedIn(true)} />;

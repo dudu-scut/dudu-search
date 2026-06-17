@@ -18,6 +18,15 @@ from app.logging_config import get_logger
 logger = get_logger("monitor")
 
 
+def _log_task_exception(task: asyncio.Task) -> None:
+    """asyncio Task 异常回调：记录 fire-and-forget 任务中未捕获的异常。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc:
+        logger.warning("后台任务异常", error=str(exc), exc_info=(type(exc), exc, exc.__traceback__))
+
+
 class ToolMonitor:
     """
     工具和助手调用的统一监控入口
@@ -103,7 +112,8 @@ class ToolMonitor:
 
         coroutine = self.websocket_manager.send_to_thread(payload, thread_id)
         if current_loop and current_loop == manager_loop:
-            current_loop.create_task(coroutine)
+            task = current_loop.create_task(coroutine)
+            task.add_done_callback(_log_task_exception)
         else:
             asyncio.run_coroutine_threadsafe(coroutine, manager_loop)
 
@@ -261,6 +271,7 @@ def _enqueue_batch(thread_id: str, payload: dict) -> None:
         except RuntimeError:
             return
         _batch_flush_task = loop.create_task(_flush_batch_after(0.05))
+        _batch_flush_task.add_done_callback(_log_task_exception)
 
 
 async def _flush_batch_after(delay: float) -> None:
