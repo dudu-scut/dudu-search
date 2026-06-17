@@ -30,6 +30,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+
+# Stray artifacts
+=0.2.0
 
 # profiling files
 chrome-profiler-events*.json
