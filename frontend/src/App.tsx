@@ -7,10 +7,10 @@ import {
   CloudServerOutlined,
   DatabaseOutlined,
   FileSearchOutlined,
+  FormOutlined,
   HistoryOutlined,
   LogoutOutlined,
   MoonOutlined,
-  SettingOutlined,
   SunOutlined,
   ToolOutlined,
   UserOutlined,
@@ -327,7 +327,7 @@ function AuthenticatedApp() {
               title={isDark ? "切换到浅色模式" : "切换到深色模式"}
             />
             <Button
-              icon={<SettingOutlined />}
+              icon={<FormOutlined />}
               onClick={() => setShowPromptManager(true)}
               title="提示词模板管理"
             />
