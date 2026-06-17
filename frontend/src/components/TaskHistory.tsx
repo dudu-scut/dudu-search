@@ -15,6 +15,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { listSessions } from "../lib/api";
+import { useSSE } from "../hooks/useSSE";
 import type { SessionSummary } from "../types";
 
 const { Text } = Typography;
@@ -86,12 +87,18 @@ export default function TaskHistory({
     }
   }, []);
 
+  // 初始加载（仅可见时）
   useEffect(() => {
     if (!visible) return;
     loadSessions();
-    const timer = setInterval(loadSessions, 30000);
-    return () => clearInterval(timer);
   }, [visible, loadSessions]);
+
+  // SSE 实时推送：会话变更时自动刷新（替代 30s 轮询）
+  useSSE(activeThreadId, {
+    onSessionUpdated: () => {
+      if (visible) loadSessions();
+    },
+  });
 
   const filteredSessions = useMemo(() => {
     return sessions.filter((session) => {

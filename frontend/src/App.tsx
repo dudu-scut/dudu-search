@@ -8,6 +8,8 @@ import {
   FileSearchOutlined,
   HistoryOutlined,
   LogoutOutlined,
+  MoonOutlined,
+  SunOutlined,
   ToolOutlined,
   UserOutlined,
 } from "@ant-design/icons";
@@ -23,6 +25,7 @@ import type { ChatTurn } from "./components/ConversationThread";
 import { API_BASE_URL, WS_BASE_URL } from "./lib/config";
 import { getUser, isLoggedIn, logout, handleSSOCallback } from "./lib/auth";
 import { useDeepAgentSession } from "./hooks/useDeepAgentSession";
+import { useTheme } from "./hooks/ThemeContext";
 import type { ConnectionState, UploadedItem } from "./types";
 
 function connectionLabel(state: ConnectionState): string {
@@ -55,6 +58,7 @@ function AuthenticatedApp() {
   const [showHistory, setShowHistory] = useState(false);
   const streamRef = useRef<HTMLElement | null>(null);
   const session = useDeepAgentSession();
+  const { isDark, toggleTheme } = useTheme();
 
   useEffect(() => {
     if (session.isViewingHistory) return;
@@ -310,6 +314,11 @@ function AuthenticatedApp() {
             >
               历史
             </Button>
+            <Button
+              icon={isDark ? <SunOutlined /> : <MoonOutlined />}
+              onClick={toggleTheme}
+              title={isDark ? "切换到浅色模式" : "切换到深色模式"}
+            />
             <div className={`run-indicator ${session.isRunning ? "run-indicator--live" : ""}`}>
               {session.isRunning ? <BranchesOutlined aria-hidden /> : <CheckCircleOutlined aria-hidden />}
               {session.isRunning ? "思考中" : "就绪"}

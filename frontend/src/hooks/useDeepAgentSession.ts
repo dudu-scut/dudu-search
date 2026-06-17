@@ -3,6 +3,7 @@ import { cancelTask, deleteUploadedFile, getSessionDetail, listSessionFiles, sta
 import { getToken } from "../lib/auth";
 import { WS_BASE_URL } from "../lib/config";
 import { createThreadId, getStoredThreadId, storeThreadId } from "../lib/thread";
+import { useSSE } from "./useSSE";
 import type {
   ConnectionState,
   MonitorMessage,
@@ -194,23 +195,22 @@ export function useDeepAgentSession() {
     };
   }, [clearSocketTimers, threadId]);
 
+  // 初始加载：sessionPath 设置后立即拉取文件列表
   useEffect(() => {
     if (!sessionPath) {
       return;
     }
-
     refreshFiles().catch((error: unknown) => {
       setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
     });
+  }, [refreshFiles, sessionPath]);
 
-    const timer = window.setInterval(() => {
-      refreshFiles().catch((error: unknown) => {
-        setLastError(error instanceof Error ? error.message : "文件列表刷新失败");
-      });
-    }, isRunning ? 15000 : 30000);
-
-    return () => window.clearInterval(timer);
-  }, [isRunning, refreshFiles, sessionPath]);
+  // SSE 实时推送：文件列表变更时自动刷新（替代轮询）
+  useSSE(threadId, {
+    onFilesUpdated: () => {
+      refreshFiles().catch(() => {});
+    },
+  });
 
   const submitTask = useCallback(
     async (query: string) => {

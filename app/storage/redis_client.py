@@ -4,6 +4,7 @@ Redis 客户端管理。
 提供异步 Redis 客户端的创建、关闭，以及热状态操作的辅助方法。
 """
 import asyncio
+import json
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -145,6 +146,56 @@ async def subscribe_ws_events(thread_id: str):
     try:
         async with conn.pubsub() as pubsub:
             channel = _ws_channel(thread_id)
+            await pubsub.subscribe(channel)
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield message["data"]
+    finally:
+        await conn.close()
+
+
+# ── Redis Pub/Sub：SSE 通知频道 ──
+# 用于替代前端 HTTP 轮询，当会话列表或文件列表发生变更时，
+# 后端主动通过 Redis 频道推送通知，SSE 端点转发给前端。
+
+_SSE_SESSION_CHANNEL = "sse:sessions"
+_SSE_FILE_PREFIX = "sse:files"
+
+
+async def publish_session_event(group_id: Optional[int], event: dict) -> None:
+    """向 SSE 会话频道发布会话变更通知（任务创建/完成/取消等）。"""
+    r = await get_redis()
+    await r.publish(_SSE_SESSION_CHANNEL, json.dumps(event, default=str))
+
+
+async def publish_file_event(thread_id: str) -> None:
+    """向 SSE 文件频道发布文件变更通知（文件上传/生成/删除）。"""
+    r = await get_redis()
+    await r.publish(f"{_SSE_FILE_PREFIX}:{thread_id}", json.dumps({
+        "event": "files_updated",
+        "thread_id": thread_id,
+    }))
+
+
+async def subscribe_sse_sessions():
+    """订阅全局 SSE 会话变更频道，返回异步生成器。"""
+    conn = await _create_pubsub_connection()
+    try:
+        async with conn.pubsub() as pubsub:
+            await pubsub.subscribe(_SSE_SESSION_CHANNEL)
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    yield message["data"]
+    finally:
+        await conn.close()
+
+
+async def subscribe_sse_files(thread_id: str):
+    """订阅指定 thread_id 的 SSE 文件变更频道，返回异步生成器。"""
+    conn = await _create_pubsub_connection()
+    try:
+        async with conn.pubsub() as pubsub:
+            channel = f"{_SSE_FILE_PREFIX}:{thread_id}"
             await pubsub.subscribe(channel)
             async for message in pubsub.listen():
                 if message["type"] == "message":

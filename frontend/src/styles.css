@@ -1888,3 +1888,421 @@ textarea {
     display: none;
   }
 }
+
+/* ═══════════════════════════════════════════
+   Dark Mode — activated via [data-theme="dark"]
+   ═══════════════════════════════════════════ */
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1a1a2e;
+  --surface: rgba(36, 36, 56, 0.96);
+  --surface-strong: rgba(42, 42, 64, 0.98);
+  --line: rgba(90, 157, 232, 0.16);
+  --line-strong: rgba(90, 157, 232, 0.28);
+  --text: #e8e6e3;
+  --muted: #94a3b8;
+  --cyan: #5a9de8;
+  --green: #4ade80;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --violet: #818cf8;
+  --shadow: 0 18px 60px rgba(0, 0, 0, 0.32);
+}
+
+/* Smooth theme transition */
+html[data-theme="dark"] *,
+html[data-theme="dark"] *::before,
+html[data-theme="dark"] *::after {
+  transition: background-color 0.25s ease, border-color 0.25s ease, color 0.25s ease;
+}
+
+/* ── Body & shell backgrounds ── */
+
+html[data-theme="dark"] body {
+  background:
+    linear-gradient(180deg, rgba(26, 26, 46, 0.82), rgba(26, 26, 46, 1)),
+    radial-gradient(circle, rgba(90, 157, 232, 0.04) 1px, transparent 1px),
+    #1a1a2e;
+}
+
+html[data-theme="dark"] .app-shell::before {
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(251, 191, 36, 0.03), transparent 50%),
+    radial-gradient(ellipse at 80% 80%, rgba(90, 157, 232, 0.04), transparent 50%);
+}
+
+/* ── Panels & cards ── */
+
+html[data-theme="dark"] .console-panel {
+  background:
+    linear-gradient(180deg, rgba(36, 36, 56, 0.85), transparent 34%),
+    rgba(36, 36, 56, 0.96);
+  box-shadow: var(--shadow), inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+html[data-theme="dark"] .thread-chip {
+  background: rgba(36, 36, 56, 0.9);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+html[data-theme="dark"] .metric-tile {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.9);
+}
+
+html[data-theme="dark"] .agent-node {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.92);
+}
+
+html[data-theme="dark"] .event-row {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.9);
+}
+
+html[data-theme="dark"] .file-item {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.92);
+}
+
+html[data-theme="dark"] .endpoint-list div {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.92);
+}
+
+html[data-theme="dark"] .empty-console,
+html[data-theme="dark"] .compact-empty {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(36, 36, 56, 0.5);
+}
+
+html[data-theme="dark"] .uploaded-list li {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.92);
+  color: #e8e6e3;
+}
+
+/* ── Code blocks, consoles & inputs ── */
+
+html[data-theme="dark"] .mission-textarea {
+  background: rgba(30, 30, 50, 0.9) !important;
+  color: var(--text) !important;
+}
+
+html[data-theme="dark"] .event-body pre,
+html[data-theme="dark"] .result-console {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(24, 24, 44, 0.92);
+  color: #d4d4d8;
+}
+
+/* ── Text color overrides ── */
+
+html[data-theme="dark"] .endpoint-list dd {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .example-copy strong {
+  color: #e8e6e3;
+}
+
+html[data-theme="dark"] .example-copy small {
+  color: #94a3b8;
+}
+
+html[data-theme="dark"] .sidebar-endpoints code {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .agent-mini-list li {
+  color: #e8e6e3;
+}
+
+/* ── Preset chips ── */
+
+html[data-theme="dark"] .preset-chip {
+  border-color: rgba(129, 140, 248, 0.22);
+  background: rgba(129, 140, 248, 0.08);
+  color: #c7d2fe;
+}
+
+html[data-theme="dark"] .preset-chip:hover,
+html[data-theme="dark"] .preset-chip:focus-visible {
+  border-color: rgba(90, 157, 232, 0.4);
+  background: rgba(90, 157, 232, 0.1);
+}
+
+/* ── Chat layout ── */
+
+html[data-theme="dark"] .chat-app-shell {
+  background:
+    linear-gradient(180deg, rgba(26, 26, 46, 0.72), rgba(26, 26, 46, 0.98)),
+    radial-gradient(circle, rgba(90, 157, 232, 0.03) 1px, transparent 1px),
+    #1a1a2e;
+}
+
+html[data-theme="dark"] .chat-app-shell::before {
+  background:
+    radial-gradient(ellipse at 78% 8%, rgba(90, 157, 232, 0.05), transparent 35%),
+    radial-gradient(ellipse at 15% 85%, rgba(251, 191, 36, 0.03), transparent 40%);
+}
+
+html[data-theme="dark"] .chat-sidebar {
+  background: rgba(28, 28, 48, 0.94);
+}
+
+html[data-theme="dark"] .sidebar-section {
+  border-color: rgba(255, 255, 255, 0.04);
+  background: rgba(36, 36, 56, 0.9);
+}
+
+html[data-theme="dark"] .sidebar-status {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.88);
+}
+
+html[data-theme="dark"] .run-indicator {
+  background: rgba(36, 36, 56, 0.88);
+}
+
+html[data-theme="dark"] .example-card {
+  border-color: rgba(90, 157, 232, 0.12);
+  background:
+    linear-gradient(135deg, rgba(90, 157, 232, 0.04), rgba(251, 191, 36, 0.02)),
+    rgba(36, 36, 56, 0.92);
+}
+
+html[data-theme="dark"] .example-card:hover,
+html[data-theme="dark"] .example-card:focus-visible {
+  border-color: rgba(90, 157, 232, 0.3);
+  background:
+    linear-gradient(135deg, rgba(90, 157, 232, 0.07), rgba(251, 191, 36, 0.03)),
+    rgba(42, 42, 64, 0.95);
+  box-shadow: 0 8px 32px rgba(90, 157, 232, 0.08), 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* ── Messages ── */
+
+html[data-theme="dark"] .message-bubble {
+  border-color: rgba(255, 255, 255, 0.05);
+  background: rgba(36, 36, 56, 0.92);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+}
+
+html[data-theme="dark"] .chat-message--user .message-bubble {
+  border-color: rgba(90, 157, 232, 0.22);
+  background: rgba(90, 157, 232, 0.1);
+  box-shadow: 0 6px 24px rgba(90, 157, 232, 0.05);
+}
+
+/* ── Thinking block ── */
+
+html[data-theme="dark"] .thinking-block {
+  border-color: rgba(90, 157, 232, 0.12);
+  background: rgba(28, 28, 48, 0.9);
+}
+
+html[data-theme="dark"] .thinking-block summary {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .thinking-event {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.88);
+}
+
+html[data-theme="dark"] .thinking-event code {
+  color: #d4d4d8;
+}
+
+/* ── Loader ── */
+
+html[data-theme="dark"] .loader-status {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .loader-duration {
+  color: #94a3b8;
+}
+
+html[data-theme="dark"] .loader-track {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+html[data-theme="dark"] .loader-steps li {
+  border-color: rgba(90, 157, 232, 0.15);
+  background: rgba(28, 28, 48, 0.8);
+  color: #94a3b8;
+}
+
+/* ── Markdown content ── */
+
+html[data-theme="dark"] .markdown-body h1,
+html[data-theme="dark"] .markdown-body h2,
+html[data-theme="dark"] .markdown-body h4 {
+  color: #e8e6e3;
+}
+
+html[data-theme="dark"] .markdown-body h3 {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .markdown-body strong {
+  color: #e8e6e3;
+}
+
+html[data-theme="dark"] .markdown-body em {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .markdown-body blockquote {
+  border-left-color: rgba(90, 157, 232, 0.45);
+  background: rgba(90, 157, 232, 0.06);
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .markdown-body code {
+  border-color: rgba(90, 157, 232, 0.18);
+  background: rgba(28, 28, 48, 0.9);
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .markdown-body pre {
+  border-color: rgba(90, 157, 232, 0.15);
+  background: rgba(28, 28, 48, 0.9);
+}
+
+html[data-theme="dark"] .markdown-body pre code {
+  color: #d4d4d8;
+}
+
+html[data-theme="dark"] .markdown-body th {
+  background: rgba(90, 157, 232, 0.1);
+  color: #e8e6e3;
+}
+
+html[data-theme="dark"] .markdown-body td {
+  background: rgba(36, 36, 56, 0.5);
+}
+
+/* ── Artifacts ── */
+
+html[data-theme="dark"] .artifact-card {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(36, 36, 56, 0.92);
+}
+
+/* ── Composer ── */
+
+html[data-theme="dark"] .chat-composer {
+  background: linear-gradient(180deg, rgba(26, 26, 46, 0), rgba(26, 26, 46, 0.96) 42%, rgba(26, 26, 46, 0.98));
+}
+
+html[data-theme="dark"] .composer-shell {
+  background: rgba(36, 36, 56, 0.96);
+  box-shadow:
+    0 12px 48px rgba(0, 0, 0, 0.28),
+    0 0 0 1px rgba(90, 157, 232, 0.03) inset;
+}
+
+html[data-theme="dark"] .composer-shell:focus-within {
+  border-color: rgba(90, 157, 232, 0.32);
+  box-shadow:
+    0 12px 48px rgba(0, 0, 0, 0.28),
+    0 0 0 3px rgba(90, 157, 232, 0.08);
+}
+
+html[data-theme="dark"] .composer-shell textarea::placeholder {
+  color: #64748b;
+}
+
+html[data-theme="dark"] .composer-icon-button {
+  border-color: rgba(255, 255, 255, 0.08) !important;
+  background: rgba(36, 36, 56, 0.88) !important;
+  color: var(--muted) !important;
+}
+
+/* ── Attachments ── */
+
+html[data-theme="dark"] .attachment-pill {
+  border-color: rgba(74, 222, 128, 0.22);
+  background: rgba(74, 222, 128, 0.06);
+  color: #86efac;
+}
+
+html[data-theme="dark"] .attachment-pill--pending {
+  border-color: rgba(251, 191, 36, 0.3);
+  background: rgba(251, 191, 36, 0.08);
+  color: #fde68a;
+}
+
+html[data-theme="dark"] .attachment-pill-remove {
+  color: #86efac;
+}
+
+html[data-theme="dark"] .attachment-pill-remove:hover {
+  background: rgba(248, 113, 113, 0.18);
+  color: #f87171;
+}
+
+/* ── Misc overrides ── */
+
+html[data-theme="dark"] .assistant-answer--pending {
+  border-color: rgba(74, 222, 128, 0.14);
+  background:
+    linear-gradient(120deg, rgba(74, 222, 128, 0.05), rgba(90, 157, 232, 0.035) 48%, rgba(74, 222, 128, 0.04)),
+    rgba(74, 222, 128, 0.035);
+}
+
+html[data-theme="dark"] .send-button--cancel {
+  border-color: rgba(248, 113, 113, 0.38) !important;
+  background: rgba(248, 113, 113, 0.14) !important;
+  color: #fca5a5 !important;
+}
+
+html[data-theme="dark"] .send-button--cancel:hover,
+html[data-theme="dark"] .send-button--cancel:focus-visible {
+  border-color: rgba(248, 113, 113, 0.58) !important;
+  background: rgba(248, 113, 113, 0.22) !important;
+}
+
+html[data-theme="dark"] .path-readout {
+  border-color: rgba(90, 157, 232, 0.14);
+  background: rgba(90, 157, 232, 0.05);
+}
+
+html[data-theme="dark"] .main-agent-node {
+  border-color: rgba(90, 157, 232, 0.28);
+  background: rgba(90, 157, 232, 0.08);
+}
+
+html[data-theme="dark"] .event-stream {
+  scrollbar-color: rgba(90, 157, 232, 0.35) rgba(255, 255, 255, 0.03);
+}
+
+html[data-theme="dark"] .chat-stream-panel {
+  scrollbar-color: rgba(90, 157, 232, 0.28) transparent;
+}
+
+html[data-theme="dark"] .upload-dropzone .ant-upload {
+  border-color: rgba(74, 222, 128, 0.18) !important;
+  background: rgba(74, 222, 128, 0.04) !important;
+}
+
+html[data-theme="dark"] .icon-button {
+  background: rgba(90, 157, 232, 0.1) !important;
+}
+
+html[data-theme="dark"] .new-chat-button {
+  border-color: rgba(90, 157, 232, 0.34) !important;
+  background: rgba(90, 157, 232, 0.12) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html[data-theme="dark"] *,
+  html[data-theme="dark"] *::before,
+  html[data-theme="dark"] *::after {
+    transition-duration: 1ms !important;
+  }
+}

@@ -7,6 +7,7 @@ import {
 import { Button, List, Popconfirm, Spin, Tag, Typography } from "antd";
 import { useCallback, useEffect, useState } from "react";
 import { deleteSession, listSessions } from "../lib/api";
+import { useSSE } from "../hooks/useSSE";
 import type { SessionSummary } from "../types";
 
 const { Text } = Typography;
@@ -35,11 +36,17 @@ export default function SessionList({ activeThreadId, onSelect, onNewSession }: 
     }
   }, []);
 
+  // 初始加载会话列表
   useEffect(() => {
     loadSessions();
-    const timer = setInterval(loadSessions, 30000);
-    return () => clearInterval(timer);
   }, [loadSessions]);
+
+  // SSE 实时推送：会话列表变更时自动刷新（替代 30s 轮询）
+  useSSE(activeThreadId, {
+    onSessionUpdated: () => {
+      loadSessions();
+    },
+  });
 
   async function handleDelete(threadId: string) {
     await deleteSession(threadId);

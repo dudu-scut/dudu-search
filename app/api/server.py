@@ -12,7 +12,6 @@ import mimetypes
 import os
 import re
 import secrets
-import shutil
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -35,7 +34,7 @@ from fastapi import (
     WebSocketDisconnect,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
@@ -60,8 +59,13 @@ from app.storage.redis_client import (
     register_active_task,
     unregister_active_task,
     get_active_task_ids,
+    publish_session_event,
+    publish_file_event,
+    subscribe_sse_sessions,
+    subscribe_sse_files,
 )
 from app.storage.db import get_pool, init_schema, close_pool
+from app.storage.storage import get_output_storage, get_upload_storage, get_doc_storage
 
 logger = get_logger("server")
 
@@ -257,7 +261,7 @@ async def rate_limit_middleware(request: Request, call_next):
     # 跳过不需要限流的路径
     if path in ("/api/health", "/live", "/ready", "/metrics"):
         return await call_next(request)
-    if path.startswith("/ws") or request.method == "OPTIONS":
+    if path.startswith("/ws") or path.startswith("/api/events") or request.method == "OPTIONS":
         return await call_next(request)
 
     try:
@@ -649,6 +653,11 @@ async def run_task(body: TaskRequest, request: Request, user: UserInfo = Depends
             thread_id, body.query[:100], user.id, user.group_id,
         )
 
+    # SSE 通知：会话列表变更
+    await publish_session_event(user.group_id, {
+        "event": "session_created", "thread_id": thread_id,
+    })
+
     # 入队到 ARQ Worker（try-finally 保证入队失败时释放并发配额）
     try:
         arq_client = request.app.state.arq_client
@@ -730,6 +739,11 @@ async def cancel_task(thread_id: str, request: Request, user: UserInfo = Depends
 
     # 5. 清理映射
     await redis.delete(f"task_job:{thread_id}")
+
+    # 6. SSE 通知：会话状态变更
+    await publish_session_event(user.group_id, {
+        "event": "session_status_changed", "thread_id": thread_id, "status": "cancelled",
+    })
 
     return {"status": "cancelled", "thread_id": thread_id}
 
@@ -823,8 +837,7 @@ async def upload_files(
         thread_id (str): 关联的任务会话 ID。
     """
     # 上传文件先按会话隔离保存，避免不同任务读取到彼此的附件
-    target_dir = updated_dir / f"session_{thread_id}"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    upload_storage = get_upload_storage()
 
     saved_files = []
     for file in files:
@@ -843,10 +856,12 @@ async def upload_files(
         if not safe_filename or safe_filename in (".", ".."):
             raise ValidationError("无效的文件名")
 
-        file_path = target_dir / safe_filename
-        with file_path.open("wb") as buffer:
-            buffer.write(content)
+        storage_path = f"session_{thread_id}/{safe_filename}"
+        await upload_storage.save(storage_path, content)
         saved_files.append(safe_filename)
+
+    # SSE 通知：文件列表变更
+    await publish_file_event(thread_id)
 
     return {"status": "uploaded", "files": saved_files}
 
@@ -875,28 +890,20 @@ async def delete_uploaded_file(
     if not safe_filename or safe_filename in (".", ".."):
         raise ValidationError("无效的文件名")
 
-    target_dir = updated_dir / f"session_{thread_id}"
-    file_path = target_dir / safe_filename
+    upload_storage = get_upload_storage()
+    storage_path = f"session_{thread_id}/{safe_filename}"
 
-    if not file_path.exists():
+    if not await upload_storage.exists(storage_path):
         raise DeepAgentsError(f"文件不存在: {safe_filename}")
 
-    if not file_path.is_relative_to(target_dir.resolve()):
-        raise PermissionDeniedError("拒绝访问: 文件路径越权")
-
-    try:
-        file_path.unlink()
-        logger.info("已删除上传文件", thread_id=thread_id, filename=safe_filename)
-    except OSError as e:
-        raise DeepAgentsError(f"删除文件失败: {e}")
+    await upload_storage.delete(storage_path)
+    logger.info("已删除上传文件", thread_id=thread_id, filename=safe_filename)
 
     # 如果目录为空，清理目录
-    try:
-        remaining = list(target_dir.iterdir())
-        if not remaining:
-            target_dir.rmdir()
-    except OSError:
-        pass
+    await upload_storage.remove_dir(f"session_{thread_id}")
+
+    # SSE 通知：文件列表变更
+    await publish_file_event(thread_id)
 
     return {"status": "deleted", "filename": safe_filename}
 
@@ -917,14 +924,10 @@ async def download_file(
         path (str): 文件相对于 output 目录的路径 (由 list_files 接口返回)。
     """
     try:
-        # 将相对路径拼接到 output 目录下，resolve 后做 is_relative_to 防止 `../` 穿越
-        output_abs = output_dir.resolve()
-        abs_path = (output_abs / path).resolve()
-
-        if not abs_path.is_relative_to(output_abs):
-            raise PermissionDeniedError("拒绝访问: 只能下载输出目录下的文件")
-    except PermissionDeniedError:
-        raise
+        output_storage = get_output_storage()
+        abs_path = await output_storage.get_absolute_path(path)
+    except PermissionError:
+        raise PermissionDeniedError("拒绝访问: 只能下载输出目录下的文件")
     except Exception:
         return {"error": "无效的路径参数"}
 
@@ -968,14 +971,12 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
     logger.debug("请求文件列表", path=path)
 
     try:
-        # 和下载接口保持同一条安全边界：前端只能查看 output 目录内部内容
-        abs_path = Path(path).resolve()
-        output_abs = output_dir.resolve()
-
-        if not abs_path.is_relative_to(output_abs):
-            logger.warning("拒绝访问: 路径不在 output 目录下", abs_path=str(abs_path), output_abs=str(output_abs))
-            return {"error": "拒绝访问: 只能访问输出目录下的文件"}
-
+        output_storage = get_output_storage()
+        # 验证路径安全性 — get_absolute_path 内部做路径遍历检查
+        abs_path = await output_storage.get_absolute_path(path)
+    except PermissionError:
+        logger.warning("拒绝访问: 路径不在 output 目录下", path=path)
+        return {"error": "拒绝访问: 只能访问输出目录下的文件"}
     except Exception as e:
         logger.warning("路径解析失败", error=str(e))
         return {"error": f"路径无效: {e}"}
@@ -983,28 +984,22 @@ async def list_files(path: str, user: UserInfo = Depends(get_current_user)):
     if not abs_path.exists():
         return {"error": "目录不存在"}
 
-    files = []
     try:
-        # 递归返回文件元数据，前端据此渲染文件列表并发起下载请求
-        for file_path in abs_path.rglob("*"):
-            if file_path.is_file():
-                stat = file_path.stat()
-                files.append(
-                    {
-                        "name": file_path.name,
-                        "type": "file",
-                        "path": str(file_path.relative_to(output_abs)),
-                        "size": stat.st_size,
-                        "mtime": stat.st_mtime,
-                    }
-                )
-
+        file_objects = await output_storage.list_files(path)
+        files = [
+            {
+                "name": fo.name,
+                "type": "file",
+                "path": fo.path,
+                "size": fo.size,
+                "mtime": fo.mtime,
+            }
+            for fo in file_objects
+        ]
     except Exception as e:
         logger.warning("遍历文件失败", error=str(e))
         return {"error": str(e)}
 
-    # 最新生成的文件排在前面，方便用户优先看到本次任务产物
-    files.sort(key=lambda x: x.get("mtime", 0), reverse=True)
     logger.debug("文件列表查询完成", count=len(files))
     return {"files": files}
 
@@ -1147,6 +1142,101 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
     finally:
         manager.disconnect(websocket, thread_id)
         logger.info("WebSocket 客户端已断开", thread_id=thread_id)
+
+
+# ── SSE 实时事件推送端点 ──
+
+
+@app.get("/api/events/stream")
+async def sse_stream(
+    request: Request,
+    thread_id: str = "",
+):
+    """SSE 实时事件推送端点，替代前端 HTTP 轮询。
+
+    通过 Redis Pub/Sub 订阅两类通知频道：
+    - 全局会话变更（sse:sessions）：任务创建/完成/取消时触发
+    - 文件变更（sse:files:{thread_id}）：文件上传/生成/删除时触发
+
+    前端使用 EventSource 连接此端点，接收 "session_updated" 和
+    "files_updated" 事件后主动刷新对应列表。
+    """
+    # 认证：从 query 参数获取 JWT（EventSource API 不支持自定义请求头）
+    token = request.query_params.get("token", "")
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing authentication token")
+    try:
+        payload = decode_token(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    async def event_generator():
+        """SSE 事件生成器：订阅 Redis 频道并持续推送通知。"""
+        # 初始连接确认
+        yield f"data: {json.dumps({'event': 'connected'})}\n\n"
+
+        try:
+            # 并行订阅两个频道
+            session_gen = subscribe_sse_sessions()
+            session_task = asyncio.ensure_future(session_gen.__anext__())
+
+            file_task = None
+            file_gen = None
+            if thread_id:
+                file_gen = subscribe_sse_files(thread_id)
+                file_task = asyncio.ensure_future(file_gen.__anext__())
+
+            pending = {session_task: "session"}
+            if file_task:
+                pending[file_task] = "file"
+
+            while True:
+                # 检查客户端是否断开
+                if await request.is_disconnected():
+                    break
+
+                done_set, _ = await asyncio.wait(
+                    list(pending.keys()),
+                    timeout=15,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+
+                if not done_set:
+                    # 超时发送心跳，维持连接活跃
+                    yield ": heartbeat\n\n"
+                    continue
+
+                for completed in done_set:
+                    kind = pending.pop(completed)
+                    try:
+                        data = completed.result()
+                        if kind == "session":
+                            yield f"event: session_updated\ndata: {data}\n\n"
+                            session_task = asyncio.ensure_future(session_gen.__anext__())
+                            pending[session_task] = "session"
+                        else:
+                            yield f"event: files_updated\ndata: {data}\n\n"
+                            file_task = asyncio.ensure_future(file_gen.__anext__())
+                            pending[file_task] = "file"
+                    except (StopAsyncIteration, asyncio.CancelledError):
+                        pass
+                    except Exception as exc:
+                        logger.warning("SSE 订阅异常", kind=kind, error=str(exc))
+
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("SSE 流异常退出", error=str(exc))
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # 禁用 Nginx 缓冲
+        },
+    )
 
 
 # ---- 会话历史管理 API ----
@@ -1490,8 +1580,8 @@ async def ingest_files(
     if not user.is_admin and not engine.check_kb_access(kb_name, user.group_id):
         raise HTTPException(status_code=403, detail=f"无权访问知识库 '{kb_name}'")
 
-    doc_dir = Path(DOC_STORE_DIR) / kb_name
-    doc_dir.mkdir(parents=True, exist_ok=True)
+    doc_storage = get_doc_storage()
+    await doc_storage.ensure_dir(kb_name)
 
     results = {}
     for file in files:
@@ -1501,11 +1591,11 @@ async def ingest_files(
             results[file.filename] = "文件名包含非法路径字符，已拒绝"
             continue
 
-        file_path = doc_dir / safe_filename
-        with file_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        storage_path = f"{kb_name}/{safe_filename}"
+        await doc_storage.save_stream(storage_path, file.file)
         try:
-            n = engine.ingest_file(kb_name, str(file_path))
+            abs_path = await doc_storage.get_absolute_path(storage_path)
+            n = engine.ingest_file(kb_name, str(abs_path))
             results[file.filename] = f"摄入成功，共 {n} 个文本块"
         except Exception as e:
             results[file.filename] = f"摄入失败: {str(e)}"

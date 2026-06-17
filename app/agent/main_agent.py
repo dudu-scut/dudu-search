@@ -298,8 +298,14 @@ async def run_deep_agent(task_query, session_id, group_id=None):
     await _ensure_session(session_id, group_id)
 
     # 每个会话独立使用 output/session_{session_id}，避免不同用户的产物互相覆盖
-    session_dir = project_root_path / "output" / f"session_{session_id}"
-    session_dir.mkdir(parents=True, exist_ok=True)
+    from app.storage.storage import get_output_storage, get_upload_storage, copy_between_storage
+
+    output_storage = get_output_storage()
+    upload_storage = get_upload_storage()
+    session_prefix = f"session_{session_id}"
+
+    await output_storage.ensure_dir(session_prefix)
+    session_dir = await output_storage.get_absolute_path(session_prefix)
 
     # 前端和工具使用绝对路径；提示词里只给模型相对路径，降低模型误用系统绝对路径的概率
     session_dir_str = str(session_dir).replace("\\", "/")
@@ -309,27 +315,20 @@ async def run_deep_agent(task_query, session_id, group_id=None):
 
     # 上传文件先落在 updated/session_{session_id}，执行前复制到本次 output 工作目录
     # 这样读文件工具和生成文件工具都只需要围绕同一个 session_dir 工作
-    updated_dir_path = project_root_path / "updated" / f"session_{session_id}"
     updated_info_prompt = ""
-    if updated_dir_path.exists():
-        files = [f.name for f in updated_dir_path.iterdir() if f.is_file()]
-        if files:
-            for filename in files:
-                src = updated_dir_path / filename
-                dst = session_dir / filename
-                try:
-                    # 同文件系统内硬链接，O(1) 操作，无数据复制
-                    os.link(src, dst)
-                except OSError:
-                    # 跨文件系统回退到物理复制
-                    shutil.copy2(src, dst)
+    upload_files = await upload_storage.list_files(session_prefix)
+    if upload_files:
+        filenames = [fo.name for fo in upload_files]
+        for filename in filenames:
+            file_rel = f"{session_prefix}/{filename}"
+            await copy_between_storage(upload_storage, file_rel, output_storage, file_rel)
 
-            # 把上传文件列表注入用户消息，提醒模型先调用 read_file_content 获取附件内容
-            updated_info_prompt = (
-                "\n    [已上传文件] 已加载到工作目录:\n"
-                + "\n".join([f"    - {f}" for f in files])
-                + "\n    请优先使用工具（read_file_content）读取并参考这些文件。"
-            )
+        # 把上传文件列表注入用户消息，提醒模型先调用 read_file_content 获取附件内容
+        updated_info_prompt = (
+            "\n    [已上传文件] 已加载到工作目录:\n"
+            + "\n".join([f"    - {f}" for f in filenames])
+            + "\n    请优先使用工具（read_file_content）读取并参考这些文件。"
+        )
 
     # ContextVar 让深层工具无需显式传参，也能拿到当前会话目录和 WebSocket thread_id
     session_dir_token = set_session_context(session_dir_str)
