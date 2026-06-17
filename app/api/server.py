@@ -1279,21 +1279,21 @@ async def list_sessions(
         group_id, group_suffix = get_group_filter(user)
         pool = await get_pool()
         async with pool.acquire() as conn:
-            # 构建参数列表：group_id（非管理员时） + limit + offset
-            params = []
+            # 构建参数列表：先算 group_suffix 占位符，再追加 group_id 到末尾
+            params = [limit, offset]
+            group_clause = group_suffix(params)
             if group_id is not None:
                 params.append(group_id)
-            params.extend([limit, offset])
 
             rows = await conn.fetch(
                 f"""SELECT s.thread_id, s.title, s.status, s.started_at, s.completed_at,
                           COUNT(m.id) AS message_count
                    FROM sessions s
                    LEFT JOIN messages m ON s.thread_id = m.thread_id
-                   WHERE {group_suffix(params)}
+                   WHERE s.{group_clause}
                    GROUP BY s.thread_id, s.title, s.status, s.started_at, s.completed_at
                    ORDER BY s.started_at DESC
-                   LIMIT ${len(params) - 1} OFFSET ${len(params)}""",
+                   LIMIT $1 OFFSET $2""",
                 *params,
             )
             sessions = []
