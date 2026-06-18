@@ -46,6 +46,7 @@ from arq.connections import RedisSettings
 from app.agent.main_agent import run_deep_agent
 from app.api.monitor import manager
 from app.auth.dependencies import UserInfo, get_current_user, get_group_filter, require_admin
+from app.auth.permissions import require_permission, require_any_permission
 from app.auth.jwt import create_access_token, decode_token, hash_password, verify_password
 from app.auth.ldap_client import LDAPClient
 from app.auth.oidc_client import OIDCClient
@@ -715,7 +716,7 @@ async def cancel_task(thread_id: str, request: Request, user: UserInfo = Depends
         )
     if not row:
         raise HTTPException(status_code=404, detail="任务不存在或已结束")
-    if not user.is_admin and str(row["user_id"]) != str(user.id):
+    if not user.has_permission("task:cancel") and str(row["user_id"]) != str(user.id):
         raise PermissionDeniedError("无权取消此任务：该任务属于其他用户")
 
     from app.storage.redis_client import get_redis_client
@@ -1055,16 +1056,26 @@ async def websocket_endpoint(websocket: WebSocket, thread_id: str):
         if row:
             session_owner = str(row["user_id"])
             if session_owner != str(ws_user_id):
-                # 检查是否为管理员
+                # 检查是否为管理员或有权限的角色
                 try:
                     user_row = None
                     async with pool.acquire() as conn:
                         user_row = await conn.fetchrow(
                             "SELECT role FROM users WHERE id = $1", ws_user_id
                         )
-                    if not user_row or user_row["role"] != "admin":
+                    if not user_row:
                         await websocket.close(code=4403, reason="Forbidden")
                         return
+                    # RBAC: admin 角色或拥有 session:read 权限的角色可通过
+                    ws_role = user_row["role"]
+                    if ws_role != "admin":
+                        perm_row = await conn.fetchrow(
+                            "SELECT 1 FROM role_permissions WHERE role_name = $1 AND permission_id = 'session:read'",
+                            ws_role,
+                        )
+                        if not perm_row:
+                            await websocket.close(code=4403, reason="Forbidden")
+                            return
                 except Exception:
                     await websocket.close(code=4403, reason="Forbidden")
                     return
@@ -1290,7 +1301,7 @@ async def list_sessions(
                           COUNT(m.id) AS message_count
                    FROM sessions s
                    LEFT JOIN messages m ON s.thread_id = m.thread_id
-                   WHERE s.{group_clause}
+                   WHERE {group_clause}
                    GROUP BY s.thread_id, s.title, s.status, s.started_at, s.completed_at
                    ORDER BY s.started_at DESC
                    LIMIT $1 OFFSET $2""",
@@ -1449,7 +1460,7 @@ async def create_share_link(
             "SELECT user_id FROM sessions WHERE thread_id = $1",
             thread_id,
         )
-        if not user.is_admin and owner_row and str(owner_row["user_id"]) != str(user.id):
+        if not user.has_permission("session:share") and owner_row and str(owner_row["user_id"]) != str(user.id):
             raise HTTPException(status_code=403, detail="无权分享此会话")
 
         # 生成分享 token
@@ -1598,7 +1609,7 @@ async def revoke_share_link(
         if not share:
             raise HTTPException(status_code=404, detail="分享链接不存在")
 
-        if not user.is_admin and str(share["created_by"]) != str(user.id):
+        if not user.has_permission("share:delete") and str(share["created_by"]) != str(user.id):
             raise HTTPException(status_code=403, detail="无权撤销此分享链接")
 
         await conn.execute(
@@ -1623,12 +1634,14 @@ async def list_memories(
     offset: int = 0,
     user: UserInfo = Depends(get_current_user),
 ):
-    """列出长期记忆（按用户隔离，管理员可查看全部）。"""
+    """列出长期记忆（按用户隔离，管理员/组管理员可查看全部）。"""
     try:
         pool = await get_pool()
         user_id_str = str(user.id)
+        # 管理员/组管理员可见全部，其他角色只看自己
+        can_view_all = user.role in ("admin", "manager")
         async with pool.acquire() as conn:
-            if user.is_admin and memory_type:
+            if can_view_all and memory_type:
                 rows = await conn.fetch(
                     """SELECT id, memory_type, content, importance, access_count,
                               last_accessed, source_thread_id, created_at
@@ -1638,7 +1651,7 @@ async def list_memories(
                        LIMIT $2 OFFSET $3""",
                     memory_type, limit, offset,
                 )
-            elif user.is_admin:
+            elif can_view_all:
                 rows = await conn.fetch(
                     """SELECT id, memory_type, content, importance, access_count,
                               last_accessed, source_thread_id, created_at
@@ -1690,11 +1703,11 @@ async def delete_memory(
     memory_id: str,
     user: UserInfo = Depends(get_current_user),
 ):
-    """删除指定记忆（按用户隔离，管理员可删除任意记忆）。"""
+    """删除指定记忆（按用户隔离，管理员/组管理员可删除任意记忆）。"""
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
-            if user.is_admin:
+            if user.role in ("admin", "manager"):
                 result = await conn.execute(
                     "DELETE FROM long_term_memories WHERE id = $1::uuid", memory_id
                 )
@@ -1759,7 +1772,7 @@ async def list_kbs(
     """列出当前用户组可见的自建 RAG 知识库。管理员可见全部。"""
     engine = get_rag_engine()
     # 防御性兜底：未分配组的用户默认归入组 1，避免看到全量数据
-    filter_group_id = None if user.is_admin else (user.group_id if user.group_id is not None else 1)
+    filter_group_id = None if user.role in ("admin", "manager") else (user.group_id if user.group_id is not None else 1)
     return {"knowledge_bases": engine.list_kbs(group_id=filter_group_id)}
 
 
@@ -1773,7 +1786,7 @@ async def delete_kb(
     if engine.get_kb(kb_name) is None:
         raise HTTPException(status_code=404, detail=f"知识库 '{kb_name}' 不存在")
     try:
-        filter_group_id = None if user.is_admin else user.group_id
+        filter_group_id = None if user.role in ("admin", "manager") else user.group_id
         engine.delete_kb(kb_name, group_id=filter_group_id)
     except ValueError as e:
         raise HTTPException(status_code=403, detail=str(e))
@@ -1792,7 +1805,7 @@ async def ingest_files(
         raise HTTPException(status_code=404, detail=f"知识库 '{kb_name}' 不存在，请先创建")
 
     # 校验组所有权
-    if not user.is_admin and not engine.check_kb_access(kb_name, user.group_id):
+    if user.role not in ("admin", "manager") and not engine.check_kb_access(kb_name, user.group_id):
         raise HTTPException(status_code=403, detail=f"无权访问知识库 '{kb_name}'")
 
     doc_storage = get_doc_storage()
@@ -1875,7 +1888,7 @@ async def list_prompt_templates(user: UserInfo = Depends(get_current_user)):
 @app.post("/api/prompt-templates")
 async def create_prompt_template(body: PromptTemplateCreateRequest, user: UserInfo = Depends(get_current_user)):
     """创建一个新的提示词模板。scope=user 时仅自己可见，scope=group 时组内可见（仅管理员）。"""
-    if body.scope == "group" and user.role != "admin":
+    if body.scope == "group" and user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="仅管理员可创建组级模板")
     if body.scope not in ("group", "user"):
         raise HTTPException(status_code=422, detail="scope 必须为 group 或 user")
@@ -1923,7 +1936,7 @@ async def update_prompt_template(
         if not existing:
             raise HTTPException(status_code=404, detail="模板不存在")
         # 权限校验
-        if existing["scope"] == "group" and user.role != "admin":
+        if existing["scope"] == "group" and user.role not in ("admin", "manager"):
             raise HTTPException(status_code=403, detail="仅管理员可修改组级模板")
         if existing["scope"] == "user" and existing["owner_id"] != user.id:
             raise HTTPException(status_code=403, detail="只能修改自己的模板")
@@ -1971,7 +1984,7 @@ async def delete_prompt_template(
         )
         if not existing:
             raise HTTPException(status_code=404, detail="模板不存在")
-        if existing["scope"] == "group" and user.role != "admin":
+        if existing["scope"] == "group" and user.role not in ("admin", "manager"):
             raise HTTPException(status_code=403, detail="仅管理员可删除组级模板")
         if existing["scope"] == "user" and existing["owner_id"] != user.id:
             raise HTTPException(status_code=403, detail="只能删除自己的模板")
@@ -2065,7 +2078,7 @@ async def readiness():
 
 
 @app.get("/api/workers/health")
-async def worker_health(user: UserInfo = Depends(require_admin)):
+async def worker_health(user: UserInfo = Depends(require_permission("worker:read"))):
     """查询所有在线 ARQ Worker 进程的状态（仅管理员可访问）。
 
     每个 Worker 进程通过 Redis 心跳定期上报状态，TTL 过期自动消失。
@@ -2094,13 +2107,263 @@ async def worker_health(user: UserInfo = Depends(require_admin)):
 
 
 @app.get("/metrics")
-async def metrics(user: UserInfo = Depends(require_admin)):
+async def metrics(user: UserInfo = Depends(require_permission("metric:read"))):
     """Prometheus 指标端点（仅管理员可访问）。"""
     from app.metrics import get_metrics
     return Response(
         content=get_metrics(),
         media_type="text/plain; charset=utf-8",
     )
+
+
+# ── RBAC 管理端点 ──
+
+
+class RoleUpdateRequest(BaseModel):
+    role: str
+
+
+class CreateRoleRequest(BaseModel):
+    name: str
+    display_name: str
+    description: str = ""
+    permission_ids: list[str] = []
+
+
+class UpdateRolePermissionsRequest(BaseModel):
+    permission_ids: list[str]
+
+
+@app.get("/api/admin/users")
+async def list_users(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    user: UserInfo = Depends(require_permission("user:read")),
+):
+    """列出所有用户及其角色信息（仅管理员）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT u.id, u.username, u.email, u.role, u.is_active, u.auth_source,
+                      u.group_id, ug.name AS group_name, u.created_at
+               FROM users u
+               LEFT JOIN user_groups ug ON u.group_id = ug.id
+               ORDER BY u.created_at DESC
+               LIMIT $1 OFFSET $2""",
+            limit, offset,
+        )
+        total = await conn.fetchval("SELECT COUNT(*) FROM users")
+
+    return {
+        "users": [
+            {
+                "id": str(r["id"]),
+                "username": r["username"],
+                "email": r["email"],
+                "role": r["role"],
+                "is_active": r["is_active"],
+                "auth_source": r["auth_source"],
+                "group_id": r["group_id"],
+                "group_name": r["group_name"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "total": total,
+    }
+
+
+@app.put("/api/admin/users/{user_id}/role")
+async def update_user_role(
+    user_id: str,
+    body: RoleUpdateRequest,
+    user: UserInfo = Depends(require_permission("user:update")),
+):
+    """修改指定用户的角色（仅管理员）。角色变更在用户下次请求时生效。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 校验目标角色存在
+        role_row = await conn.fetchrow(
+            "SELECT name FROM roles WHERE name = $1", body.role
+        )
+        if not role_row:
+            raise HTTPException(status_code=400, detail=f"角色 '{body.role}' 不存在")
+
+        # 校验目标用户存在
+        target = await conn.fetchrow(
+            "SELECT id, username FROM users WHERE id = $1::uuid", user_id
+        )
+        if not target:
+            raise HTTPException(status_code=404, detail="用户不存在")
+
+        # 防止自己改自己
+        if str(target["id"]) == str(user.id):
+            raise HTTPException(status_code=400, detail="不可修改自己的角色")
+
+        await conn.execute(
+            "UPDATE users SET role = $1 WHERE id = $2::uuid", body.role, user_id
+        )
+
+    # 清除权限缓存，确保新角色权限立即生效
+    try:
+        from app.auth.permissions import invalidate_permission_cache
+        await invalidate_permission_cache()
+    except Exception:
+        pass
+
+    return {"status": "updated", "user_id": user_id, "new_role": body.role}
+
+
+@app.get("/api/admin/roles")
+async def list_roles(
+    user: UserInfo = Depends(require_permission("role:read")),
+):
+    """列出所有角色及其权限集合。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        role_rows = await conn.fetch(
+            "SELECT name, display_name, description, is_system, created_at FROM roles ORDER BY name"
+        )
+        perm_rows = await conn.fetch(
+            "SELECT role_name, permission_id FROM role_permissions ORDER BY role_name, permission_id"
+        )
+
+    # 按角色聚合权限
+    perms_by_role: dict[str, list[str]] = {}
+    for r in perm_rows:
+        perms_by_role.setdefault(r["role_name"], []).append(r["permission_id"])
+
+    # 获取所有权限定义（用于前端展示）
+    all_perms = await _get_all_permissions()
+
+    return {
+        "roles": [
+            {
+                "name": r["name"],
+                "display_name": r["display_name"],
+                "description": r["description"],
+                "is_system": r["is_system"],
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                "permissions": perms_by_role.get(r["name"], []),
+            }
+            for r in role_rows
+        ],
+        "all_permissions": all_perms,
+    }
+
+
+async def _get_all_permissions() -> list[dict]:
+    """获取所有权限定义（辅助函数）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, resource, action, description FROM permissions ORDER BY resource, action"
+        )
+    return [
+        {
+            "id": r["id"],
+            "resource": r["resource"],
+            "action": r["action"],
+            "description": r["description"],
+        }
+        for r in rows
+    ]
+
+
+@app.post("/api/admin/roles")
+async def create_role(
+    body: CreateRoleRequest,
+    user: UserInfo = Depends(require_permission("role:manage")),
+):
+    """创建自定义角色并分配权限（仅管理员）。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 校验角色名不重复
+        existing = await conn.fetchrow(
+            "SELECT name FROM roles WHERE name = $1", body.name
+        )
+        if existing:
+            raise HTTPException(status_code=409, detail=f"角色 '{body.name}' 已存在")
+
+        # 校验权限 ID 合法性
+        if body.permission_ids:
+            valid_ids = await conn.fetch(
+                "SELECT id FROM permissions WHERE id = ANY($1::text[])",
+                body.permission_ids,
+            )
+            valid_set = {r["id"] for r in valid_ids}
+            invalid = set(body.permission_ids) - valid_set
+            if invalid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无效的权限 ID: {', '.join(invalid)}",
+                )
+
+        # 创建角色
+        await conn.execute(
+            """INSERT INTO roles (name, display_name, description, is_system)
+               VALUES ($1, $2, $3, FALSE)""",
+            body.name, body.display_name, body.description,
+        )
+
+        # 绑定权限
+        for pid in body.permission_ids:
+            await conn.execute(
+                "INSERT INTO role_permissions (role_name, permission_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                body.name, pid,
+            )
+
+    return {"status": "created", "role": body.name, "permissions": body.permission_ids}
+
+
+@app.put("/api/admin/roles/{role_name}")
+async def update_role_permissions(
+    role_name: str,
+    body: UpdateRolePermissionsRequest,
+    user: UserInfo = Depends(require_permission("role:manage")),
+):
+    """修改角色的权限集合（全量替换）。内置角色的权限也可修改。"""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 校验角色存在
+        existing = await conn.fetchrow(
+            "SELECT name, is_system FROM roles WHERE name = $1", role_name
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"角色 '{role_name}' 不存在")
+
+        # 校验权限 ID 合法性
+        if body.permission_ids:
+            valid_ids = await conn.fetch(
+                "SELECT id FROM permissions WHERE id = ANY($1::text[])",
+                body.permission_ids,
+            )
+            valid_set = {r["id"] for r in valid_ids}
+            invalid = set(body.permission_ids) - valid_set
+            if invalid:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"无效的权限 ID: {', '.join(invalid)}",
+                )
+
+        # 全量替换权限集合
+        await conn.execute(
+            "DELETE FROM role_permissions WHERE role_name = $1", role_name
+        )
+        for pid in body.permission_ids:
+            await conn.execute(
+                "INSERT INTO role_permissions (role_name, permission_id) VALUES ($1, $2)",
+                role_name, pid,
+            )
+
+    # 清除缓存使变更立即生效
+    try:
+        from app.auth.permissions import invalidate_permission_cache
+        await invalidate_permission_cache(role_name)
+    except Exception:
+        pass
+
+    return {"status": "updated", "role": role_name, "permissions": body.permission_ids}
 
 
 if __name__ == "__main__":
