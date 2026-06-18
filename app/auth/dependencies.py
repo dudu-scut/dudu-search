@@ -9,19 +9,39 @@ from app.exceptions import AuthError, PermissionDeniedError
 
 
 class UserInfo:
-    """从 JWT 解析出的用户信息。"""
+    """从 JWT 解析出的用户信息。
+
+    attributes:
+        id:          用户唯一标识（JWT sub）
+        username:    用户名
+        role:        角色名（"admin" / "manager" / "user" / "viewer" / 自定义）
+        group_id:    所属用户组 ID
+        permissions: 权限 ID 集合，由 RBAC 依赖工厂填充；未加载时为 None
+    """
 
     def __init__(self, payload: dict):
         self.id: str = payload.get("sub") or ""
         self.username: str = payload.get("username") or ""
         self.role: str = payload.get("role", "user")
         self.group_id: Optional[int] = payload.get("group_id")
+        self.permissions: Optional[set] = None  # RBAC 延迟填充
         if not self.id:
             raise AuthError("无效的认证 token: 缺少用户标识")
 
     @property
     def is_admin(self) -> bool:
+        """向后兼容的管理员判断（deprecated，新代码应使用 require_permission）。"""
         return self.role == "admin"
+
+    def has_permission(self, permission: str) -> bool:
+        """检查是否拥有指定权限。
+
+        permissions 未加载时退化为 role 判断（仅 admin 通过）。
+        admin 角色（permissions 含 "*"）直接通过。
+        """
+        if self.permissions is None:
+            return self.role == "admin"
+        return "*" in self.permissions or permission in self.permissions
 
 
 async def get_current_user(
@@ -51,8 +71,16 @@ async def get_current_user(
 async def require_admin(
     user: UserInfo = Depends(get_current_user),
 ) -> UserInfo:
+    """要求管理员权限（向后兼容，内部委托给 RBAC）。"""
     if not user.is_admin:
         raise PermissionDeniedError("需要管理员权限")
+    # 为 admin 填充权限集合，使下游 has_permission() 一致
+    if user.permissions is None:
+        try:
+            from app.auth.permissions import get_user_permissions
+            user.permissions = await get_user_permissions(user.role)
+        except Exception:
+            user.permissions = {"*"}  # 降级兜底
     return user
 
 

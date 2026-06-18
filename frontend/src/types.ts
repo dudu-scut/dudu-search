@@ -179,3 +179,43 @@ export interface KnowledgeBaseIngestResponse {
   kb_name: string;
   results: Record<string, string>;
 }
+
+// ── RBAC 权限系统 ──
+
+export interface Permission {
+  id: string;
+  resource: string;
+  action: string;
+  description: string;
+}
+
+export interface Role {
+  name: string;
+  display_name: string;
+  description: string;
+  is_system: boolean;
+  created_at: string | null;
+  permissions: string[];
+}
+
+export interface RoleListResponse {
+  roles: Role[];
+  all_permissions: Permission[];
+}
+
+export interface AdminUser {
+  id: string;
+  username: string;
+  email: string | null;
+  role: string;
+  is_active: boolean;
+  auth_source: string;
+  group_id: number | null;
+  group_name: string | null;
+  created_at: string | null;
+}
+
+export interface AdminUserListResponse {
+  users: AdminUser[];
+  total: number;
+}

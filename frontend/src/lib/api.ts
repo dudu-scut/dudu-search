@@ -290,3 +290,69 @@ export async function ingestKBFiles(
   }
   return response.json() as Promise<KnowledgeBaseIngestResponse>;
 }
+
+// ── RBAC 管理 API ──
+
+import type {
+  AdminUserListResponse,
+  RoleListResponse,
+} from "../types";
+
+/** 获取用户列表（含角色信息，仅管理员） */
+export async function listAdminUsers(
+  limit = 100,
+  offset = 0
+): Promise<AdminUserListResponse> {
+  return requestJson<AdminUserListResponse>(
+    apiUrl(`/api/admin/users?limit=${limit}&offset=${offset}`)
+  );
+}
+
+/** 修改用户角色 */
+export async function updateUserRole(
+  userId: string,
+  role: string
+): Promise<{ status: string }> {
+  return requestJson(
+    apiUrl(`/api/admin/users/${encodeURIComponent(userId)}/role`),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ role }),
+    }
+  );
+}
+
+/** 获取角色列表（含权限集合） */
+export async function listRoles(): Promise<RoleListResponse> {
+  return requestJson<RoleListResponse>(apiUrl("/api/admin/roles"));
+}
+
+/** 创建自定义角色 */
+export async function createRole(data: {
+  name: string;
+  display_name: string;
+  description?: string;
+  permission_ids?: string[];
+}): Promise<{ status: string }> {
+  return requestJson(apiUrl("/api/admin/roles"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
+/** 修改角色权限集合（全量替换） */
+export async function updateRolePermissions(
+  roleName: string,
+  permissionIds: string[]
+): Promise<{ status: string }> {
+  return requestJson(
+    apiUrl(`/api/admin/roles/${encodeURIComponent(roleName)}`),
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ permission_ids: permissionIds }),
+    }
+  );
+}

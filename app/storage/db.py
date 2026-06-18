@@ -279,4 +279,127 @@ async def init_schema() -> None:
             CREATE INDEX IF NOT EXISTS idx_templates_scope ON prompt_templates(scope, group_id, owner_id);
         """)
 
-        logger.info("Schema 初始化完成")
+        # ── RBAC 细粒度权限系统 ──
+
+        # 角色表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                name VARCHAR(30) PRIMARY KEY,
+                display_name VARCHAR(100) NOT NULL,
+                description TEXT,
+                is_system BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );
+        """)
+
+        # 权限定义表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS permissions (
+                id VARCHAR(60) PRIMARY KEY,
+                resource VARCHAR(30) NOT NULL,
+                action VARCHAR(20) NOT NULL,
+                description TEXT
+            );
+        """)
+
+        # 角色-权限关联表
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS role_permissions (
+                role_name VARCHAR(30) NOT NULL REFERENCES roles(name) ON DELETE CASCADE,
+                permission_id VARCHAR(60) NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+                PRIMARY KEY (role_name, permission_id)
+            );
+        """)
+
+        # 种子数据：4 个内置角色（幂等）
+        await conn.execute("""
+            INSERT INTO roles (name, display_name, description, is_system) VALUES
+                ('admin',   '系统管理员', '拥有所有权限',             TRUE),
+                ('manager', '组管理员',   '管理本组资源，不可管用户和系统', TRUE),
+                ('user',    '普通用户',   '使用任务、上传、会话、记忆',    TRUE),
+                ('viewer',  '只读用户',   '仅查看，不可创建或删除',       TRUE)
+            ON CONFLICT (name) DO NOTHING;
+        """)
+
+        # 种子数据：28 个权限（幂等）
+        await conn.execute("""
+            INSERT INTO permissions (id, resource, action, description) VALUES
+                ('task:create',   'task',   'create',  '创建任务'),
+                ('task:read',     'task',   'read',    '查看任务'),
+                ('task:cancel',   'task',   'cancel',  '取消任务'),
+                ('file:upload',   'file',   'upload',  '上传文件'),
+                ('file:download', 'file',   'download','下载文件'),
+                ('file:delete',   'file',   'delete',  '删除文件'),
+                ('file:list',     'file',   'list',    '列出文件'),
+                ('session:read',  'session','read',    '查看会话'),
+                ('session:delete','session','delete',  '删除会话'),
+                ('session:share', 'session','share',   '分享会话'),
+                ('memory:create', 'memory', 'create',  '创建记忆'),
+                ('memory:read',   'memory', 'read',    '查看记忆'),
+                ('memory:delete', 'memory', 'delete',  '删除记忆'),
+                ('kb:create',     'kb',     'create',  '创建知识库'),
+                ('kb:read',       'kb',     'read',    '查看知识库'),
+                ('kb:delete',     'kb',     'delete',  '删除知识库'),
+                ('kb:ingest',     'kb',     'ingest',  '摄入文档'),
+                ('prompt:create', 'prompt', 'create',  '创建提示词模板'),
+                ('prompt:read',   'prompt', 'read',    '查看提示词模板'),
+                ('prompt:update', 'prompt', 'update',  '修改提示词模板'),
+                ('prompt:delete', 'prompt', 'delete',  '删除提示词模板'),
+                ('metric:read',   'metric', 'read',    '查看监控指标'),
+                ('user:read',     'user',   'read',    '查看用户列表'),
+                ('user:update',   'user',   'update',  '修改用户角色'),
+                ('role:read',     'role',   'read',    '查看角色列表'),
+                ('role:manage',   'role',   'manage',  '管理角色权限'),
+                ('worker:read',   'worker', 'read',    '查看 Worker 状态'),
+                ('share:create',  'share',  'create',  '创建分享链接'),
+                ('share:delete',  'share',  'delete',  '删除分享链接')
+            ON CONFLICT (id) DO NOTHING;
+        """)
+
+        # 种子数据：admin → 全部权限
+        await conn.execute("""
+            INSERT INTO role_permissions (role_name, permission_id)
+            SELECT 'admin', id FROM permissions
+            ON CONFLICT DO NOTHING;
+        """)
+
+        # 种子数据：manager → 除 user:*/role:*/metric:*/worker:* 外的全部权限
+        await conn.execute("""
+            INSERT INTO role_permissions (role_name, permission_id)
+            SELECT 'manager', id FROM permissions
+            WHERE resource NOT IN ('user', 'role', 'metric', 'worker')
+            ON CONFLICT DO NOTHING;
+        """)
+
+        # 种子数据：user → task/file/session/memory/kb:read/share:create/prompt:read+create
+        await conn.execute("""
+            INSERT INTO role_permissions (role_name, permission_id)
+            SELECT 'user', id FROM permissions
+            WHERE id IN (
+                'task:create','task:read','task:cancel',
+                'file:upload','file:download','file:delete','file:list',
+                'session:read','session:share',
+                'memory:create','memory:read','memory:delete',
+                'kb:read',
+                'prompt:create','prompt:read',
+                'share:create'
+            )
+            ON CONFLICT DO NOTHING;
+        """)
+
+        # 种子数据：viewer → 所有 read + download + list
+        await conn.execute("""
+            INSERT INTO role_permissions (role_name, permission_id)
+            SELECT 'viewer', id FROM permissions
+            WHERE id IN (
+                'task:read',
+                'file:download','file:list',
+                'session:read',
+                'memory:read',
+                'kb:read',
+                'prompt:read'
+            )
+            ON CONFLICT DO NOTHING;
+        """)
+
+        logger.info("Schema 初始化完成（含 RBAC 表与种子数据）")
