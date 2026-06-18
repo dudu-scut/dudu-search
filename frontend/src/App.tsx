@@ -236,9 +236,9 @@ function AuthenticatedApp() {
     <div className="chat-app-shell min-h-dvh">
       <aside className="chat-sidebar" aria-label="会话信息">
         <div className="sidebar-brand">
-          <span className="panel-kicker">DEEPSEARCH</span>
+          <span className="panel-kicker">NexusAI</span>
           <h1>深度研搜</h1>
-          <p>多智能体研究助手</p>
+          <p>Research Agent</p>
         </div>
 
         <Button className="new-chat-button" block onClick={handleNewSession}>
@@ -314,7 +314,7 @@ function AuthenticatedApp() {
         <header className="chat-topbar">
           <div>
             <span className="panel-kicker">对话空间</span>
-            <h2>深度研搜</h2>
+            <h2>NexusAI · Research</h2>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <Button

@@ -67,7 +67,7 @@ const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
         style={{ width: 400, boxShadow: "0 2px 8px rgba(0,0,0,0.1)" }}
       >
         <h2 style={{ textAlign: "center", marginBottom: 24 }}>
-          DeepAgents 深度研搜
+          NexusAI · Research Agent
         </h2>
         <Tabs
           activeKey={activeTab}
