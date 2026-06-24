@@ -321,7 +321,7 @@ async def init_schema() -> None:
             ON CONFLICT (name) DO NOTHING;
         """)
 
-        # 种子数据：28 个权限（幂等）
+        # 种子数据：29 个权限（幂等）
         await conn.execute("""
             INSERT INTO permissions (id, resource, action, description) VALUES
                 ('task:create',   'task',   'create',  '创建任务'),

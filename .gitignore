@@ -100,3 +100,14 @@ app/self_rag_data/
 
 # Coverage
 .coverage
+
+# Python packaging
+*.egg-info/
+*.egg
+build/
+
+# Logs
+*.log
+
+# OS temp files
+~$*
